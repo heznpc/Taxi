@@ -1,0 +1,188 @@
+// `.mcpb` (MCPB Desktop Extension) manifest template tests.
+//
+// The manifest is what Claude Desktop parses to show the extension in
+// "Browse extensions" — a shape regression here breaks the install
+// experience silently. Byte-level drift is caught by build:mcpb:check;
+// these tests pin the schema expectations (spec v0.3) + substitution
+// correctness.
+
+import { describe, test, expect } from "@jest/globals";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const template = readFileSync(join(ROOT, "mcpb", "manifest.template.json"), "utf-8");
+
+function render(version = "9.9.9", description = "Test description") {
+  const manifest = JSON.parse(template);
+  expect(manifest.version).toBe("{{VERSION}}");
+  expect(manifest.description).toBe("{{DESCRIPTION}}");
+  manifest.version = version;
+  manifest.description = description;
+  return manifest;
+}
+
+describe("mcpb manifest template — MCPB v0.3 required fields", () => {
+  test("manifest_version pinned to 0.3", () => {
+    const m = render();
+    // Bump intentionally when the spec version changes — forces a
+    // review pass against the new required fields.
+    expect(m.manifest_version).toBe("0.3");
+  });
+
+  test("name is MCPB-safe (lowercase alphanumerics + hyphens)", () => {
+    const m = render();
+    expect(m.name).toMatch(/^[a-z][a-z0-9-]*$/);
+    expect(m.name).toBe("taxi");
+  });
+
+  test("version substituted from {{VERSION}}", () => {
+    expect(render("1.2.3").version).toBe("1.2.3");
+    expect(render("2.11.0-rc.1").version).toBe("2.11.0-rc.1");
+  });
+
+  test("description is assigned without hand-escaped JSON fragments", () => {
+    expect(render("1.0.0", 'Say "hi"').description).toBe('Say "hi"');
+    const description = 'Windows path C:\\Taxi\nsecond line\t"quoted"';
+    const rendered = render("1.0.0", description);
+    expect(JSON.parse(JSON.stringify(rendered)).description).toBe(description);
+  });
+
+  test("author.name is required and non-empty", () => {
+    const m = render();
+    expect(m.author).toBeDefined();
+    expect(typeof m.author.name).toBe("string");
+    expect(m.author.name.length).toBeGreaterThan(0);
+  });
+
+  test("server config points at Node entry with __dirname-anchored args", () => {
+    const m = render();
+    expect(m.server.type).toBe("node");
+    expect(m.server.entry_point).toBe("server/dist/index.js");
+    expect(m.server.mcp_config.command).toBe("node");
+    expect(m.server.mcp_config.args).toEqual(["${__dirname}/server/dist/index.js", "run"]);
+  });
+});
+
+describe("mcpb manifest template — user_config (MCPB-spec-aware)", () => {
+  test("gemini_api_key is sensitive (masked input + secure storage)", () => {
+    const m = render();
+    const gk = m.user_config.gemini_api_key;
+    expect(gk).toBeDefined();
+    expect(gk.type).toBe("string");
+    expect(gk.sensitive).toBe(true);
+    expect(gk.required).toBe(false);
+  });
+
+  test("load_all_modules default matches Taxi's starter-module stance", () => {
+    const m = render();
+    const la = m.user_config.load_all_modules;
+    expect(la.type).toBe("boolean");
+    expect(la.default).toBe(false);
+    // If the default flips, the bundle starts loading the full module catalog by
+    // default — a footprint change that warrants re-audit + CHANGELOG
+    // entry. Lock it here.
+  });
+
+  test("env substitutes user_config via MCPB ${user_config.KEY} syntax", () => {
+    const m = render();
+    expect(m.server.mcp_config.env.GEMINI_API_KEY).toBe("${user_config.gemini_api_key}");
+    expect(m.server.mcp_config.env.TAXI_FULL).toBe("${user_config.load_all_modules}");
+    expect(m.server.mcp_config.env.TAXI_PROFILE).toBe("${user_config.profile}");
+    expect(m.server.mcp_config.env.TAXI_TOOL_EXPOSURE).toBe("${user_config.tool_exposure}");
+  });
+
+  test("profile and tool exposure default to the thin starter surface", () => {
+    const m = render();
+    expect(m.user_config.profile.type).toBe("string");
+    expect(m.user_config.profile.default).toBe("starter");
+    expect(m.user_config.tool_exposure.type).toBe("string");
+    expect(m.user_config.tool_exposure.default).toBe("progressive");
+  });
+
+  test("every referenced user_config key exists in user_config", () => {
+    const m = render();
+    const declared = new Set(Object.keys(m.user_config ?? {}));
+    const env = m.server.mcp_config.env ?? {};
+    for (const value of Object.values(env)) {
+      const match = /\$\{user_config\.([^}]+)\}/.exec(value);
+      if (!match) continue;
+      expect(declared.has(match[1])).toBe(true);
+    }
+  });
+});
+
+describe("mcpb manifest template — compatibility pin", () => {
+  test("platforms is darwin-only (Taxi's Apple-native scope)", () => {
+    const m = render();
+    expect(m.compatibility.platforms).toEqual(["darwin"]);
+  });
+
+  test("Node runtime requirement stays in sync with package.json engines", () => {
+    // Canary — if package.json bumps engines.node, the mcpb manifest
+    // must be updated in lockstep or Claude Desktop will refuse to
+    // install the bundle on older runtimes.
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8"));
+    const m = render();
+    expect(m.compatibility.runtimes.node).toMatch(/^>=\d+\.\d+\.\d+$/);
+    if (pkg.engines?.node) {
+      // Extract the major version floor from each and compare.
+      const pkgMajor = Number(/>=?(\d+)/.exec(pkg.engines.node)?.[1] ?? 0);
+      const mcpbMajor = Number(/>=?(\d+)/.exec(m.compatibility.runtimes.node)?.[1] ?? 0);
+      expect(mcpbMajor).toBe(pkgMajor);
+    }
+  });
+});
+
+describe("mcpb manifest template — tools_generated / prompts_generated", () => {
+  test("both are true (Taxi registers dynamically at runtime)", () => {
+    const m = render();
+    // Taxi's tool surface includes dynamic shortcuts + skills, so the
+    // MCPB installer cannot enumerate them at install time. These flags
+    // tell Claude Desktop to treat the extension as having a runtime
+    // discovery model.
+    expect(m.tools_generated).toBe(true);
+    expect(m.prompts_generated).toBe(true);
+  });
+});
+
+describe("mcpb manifest template — well-formedness", () => {
+  test("renders to valid JSON with no leftover template placeholders", () => {
+    const rendered = JSON.stringify(render("1.0.0", "test"));
+    expect(rendered).not.toContain("{{");
+    expect(() => JSON.parse(rendered)).not.toThrow();
+  });
+
+  test("every placeholder has a matching substitution in build-mcpb.mjs", () => {
+    // Grab placeholders used in the template and confirm build-mcpb.mjs
+    // substitutes each. Prevents a "template expects {{FOO}} but the
+    // build script only replaces {{VERSION}}" drift.
+    const placeholders = [...template.matchAll(/\{\{([A-Z_]+)\}\}/g)].map((m) => m[1]);
+    const unique = [...new Set(placeholders)];
+    const build = readFileSync(join(ROOT, "scripts", "build-mcpb.mjs"), "utf-8");
+    for (const p of unique) {
+      expect(build).toContain(`{{${p}}}`);
+    }
+  });
+
+  test("privacy_policies entry is a stable URL", () => {
+    const m = render();
+    expect(Array.isArray(m.privacy_policies)).toBe(true);
+    expect(m.privacy_policies[0]).toMatch(/^https:\/\//);
+  });
+});
+
+describe("mcpb manifest template — source-preview position", () => {
+  test("long_description identifies the product without a catalog-size headline", () => {
+    const m = render();
+    expect(m.long_description).toMatch(/local workspace for coordinating AI sessions and tools/i);
+    expect(m.long_description).toMatch(/source preview/i);
+    expect(m.long_description).toMatch(/not the native Task Dashboard UI/i);
+    expect(m.long_description).toMatch(/read-only Codex turns/i);
+    expect(m.long_description).toMatch(/Build this bundle locally with Node.js 22/i);
+    expect(m.long_description).toMatch(/visionOS and watchOS remain roadmap targets/i);
+    expect(m.long_description).toMatch(/per-call HITL/i);
+    expect(m.long_description).not.toMatch(/\d+\s+(?:tools?|modules?)/i);
+  });
+});

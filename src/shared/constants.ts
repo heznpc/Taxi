@@ -1,0 +1,236 @@
+/**
+ * Centralized constants for Taxi.
+ *
+ * All magic numbers, API URLs, timeouts, buffer sizes, and limits live here.
+ * Each constant can be overridden via environment variable where noted.
+ *
+ * When APIs or models change versions, update ONLY this file.
+ */
+
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// ── Helper ───────────────────────────────────────────────────────────
+
+export const HOME = process.env.HOME ?? process.env.USERPROFILE ?? "";
+
+function envInt(key: string, fallback: number): number {
+  const v = process.env[key];
+  if (!v) return fallback;
+  const parsed = parseInt(v, 10);
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function envStr(key: string, fallback: string): string {
+  return process.env[key] || fallback;
+}
+
+function resolveTilde(p: string): string {
+  return p.startsWith("~/") ? join(HOME, p.slice(2)) : p;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// API URLs — change here when services update endpoints
+// ══════════════════════════════════════════════════════════════════════
+
+export const API = {
+  /** Open-Meteo weather forecast */
+  WEATHER: envStr("TAXI_WEATHER_API_URL", "https://api.open-meteo.com/v1/forecast"),
+  /** Open-Meteo geocoding */
+  GEOCODING: envStr("TAXI_GEOCODING_API_URL", "https://geocoding-api.open-meteo.com/v1/search"),
+  /** Nominatim reverse geocoding */
+  REVERSE_GEOCODE: envStr("TAXI_REVERSE_GEOCODE_API_URL", "https://nominatim.openstreetmap.org/reverse"),
+  /** Gemini embedding API base */
+  GEMINI_BASE: envStr("TAXI_GEMINI_API_URL", "https://generativelanguage.googleapis.com/v1beta/models"),
+  /** Local Ollama HTTP API */
+  OLLAMA: envStr("TAXI_OLLAMA_URL", "http://localhost:11434"),
+} as const;
+
+/** Per-host circuit breaker identifiers. Must be compile-time constants —
+ *  the breaker registry has no eviction. Add new outbound hosts here. */
+export const BREAKER = {
+  OPEN_METEO: "open-meteo",
+  NOMINATIM: "nominatim",
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// MODEL NAMES — change here when models are upgraded
+// ══════════════════════════════════════════════════════════════════════
+
+export const MODELS = {
+  /** Gemini embedding model name (GA — update when newer stable version is released) */
+  GEMINI_EMBEDDING: envStr("TAXI_EMBEDDING_MODEL", "gemini-embedding-2"),
+  /** Embedding output dimension (256/512/1024/2048/3072). 256 is optimal for tool/note search. */
+  EMBEDDING_DIM: envInt("TAXI_EMBEDDING_DIM", 256),
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// TIMEOUTS (milliseconds)
+// ══════════════════════════════════════════════════════════════════════
+
+export const TIMEOUT = {
+  /** JXA osascript execution */
+  JXA: envInt("TAXI_TIMEOUT_JXA", 30_000),
+  /** Swift bridge execution */
+  SWIFT: envInt("TAXI_TIMEOUT_SWIFT", 60_000),
+  /** SIGKILL grace after SIGTERM */
+  KILL_GRACE: 3_000,
+  /** Geocoding / reverse geocoding API calls */
+  GEOCODE: envInt("TAXI_TIMEOUT_GEOCODE", 10_000),
+  /** Gemini single embedding request */
+  EMBED_SINGLE: 15_000,
+  /** Gemini batch embedding request */
+  EMBED_BATCH: 30_000,
+  /** Messages AppleScript send */
+  MESSAGE_SEND: 15_000,
+  /** GWS CLI default timeout */
+  GWS: envInt("TAXI_TIMEOUT_GWS", 15_000),
+  /** Quick CLI binary availability probe */
+  CLI_PROBE: 5_000,
+  /** Shortcuts list enumeration */
+  SHORTCUTS_LIST: 10_000,
+  /** HTTP session idle TTL */
+  SESSION_IDLE: envInt("TAXI_SESSION_IDLE_TTL", 5 * 60_000),
+  /** HTTP session cleanup interval */
+  SESSION_CLEANUP: 60_000,
+  /** Vector store staleness threshold */
+  VECTOR_STALE: 30 * 60_000,
+  /** Semantic index cooldown after failure */
+  INDEX_COOLDOWN: envInt("TAXI_INDEX_COOLDOWN", 5 * 60_000),
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// BUFFER SIZES (bytes)
+// ══════════════════════════════════════════════════════════════════════
+
+export const BUFFER = {
+  /** JXA osascript max stdout */
+  JXA: envInt("TAXI_BUFFER_JXA", 10 * 1024 * 1024),
+  /** Swift bridge max stdout */
+  SWIFT: envInt("TAXI_BUFFER_SWIFT", 10 * 1024 * 1024),
+  /** Swift bridge max single response line (NDJSON) — guards against malformed/oversized rows */
+  SWIFT_LINE_MAX: envInt("TAXI_BUFFER_SWIFT_LINE", 1024 * 1024),
+  /** GWS CLI max stdout */
+  GWS: 10 * 1024 * 1024,
+  /** Clipboard content max chars */
+  CLIPBOARD: 5_000_000,
+  /** Screenshot/capture max bytes */
+  CAPTURE: 5 * 1024 * 1024,
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// CONCURRENCY & CIRCUIT BREAKER
+// ══════════════════════════════════════════════════════════════════════
+
+let _jxaSlots: number | undefined;
+let _cbThreshold: number | undefined;
+let _cbOpenMs: number | undefined;
+
+export const CONCURRENCY = {
+  /** Max parallel JXA/osascript processes (lazy-once — deferred until first use so config can set env vars) */
+  get JXA_SLOTS() {
+    return (_jxaSlots ??= envInt("TAXI_JXA_CONCURRENCY", 3));
+  },
+  /** Max parallel Swift bridge processes */
+  SWIFT_SLOTS: 2 as const,
+  /** Max parallel GWS CLI processes */
+  GWS_SLOTS: 3 as const,
+  /** JXA retry attempts */
+  JXA_RETRIES: 2 as const,
+  /** JXA retry delays (ms) */
+  JXA_RETRY_DELAYS: [500, 1000] as readonly number[],
+  /** Circuit breaker: failures before open (lazy-once — deferred until first use) */
+  get CB_THRESHOLD() {
+    return (_cbThreshold ??= envInt("TAXI_CB_THRESHOLD", 3));
+  },
+  /** Circuit breaker: open duration ms (lazy-once — deferred until first use) */
+  get CB_OPEN_MS() {
+    return (_cbOpenMs ??= envInt("TAXI_CB_OPEN_MS", 60_000));
+  },
+  /** Circuit breaker: max apps tracked */
+  CB_CACHE_SIZE: 50 as const,
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// LIMITS
+// ══════════════════════════════════════════════════════════════════════
+
+export const LIMITS = {
+  /** Max HTTP sessions */
+  HTTP_SESSIONS: envInt("TAXI_MAX_SESSIONS", 50),
+  /** Max dynamic shortcut tools */
+  DYNAMIC_SHORTCUTS: 50,
+  /** Max email recipients per send */
+  MAIL_RECIPIENTS: 20,
+  /** Gemini batch embedding chunk size */
+  EMBED_BATCH_SIZE: 100,
+  /** Semantic search default topK */
+  SEARCH_TOP_K: 10,
+  /** Semantic search similarity threshold */
+  SEARCH_THRESHOLD: 0.5,
+  /** Max notes for scan_notes bulk operation */
+  NOTES_BULK_SCAN: 500,
+  /** Max reminders for context snapshot */
+  SNAPSHOT_REMINDERS: 500,
+  /** Embedding cache memory cap in MB (env: TAXI_EMBED_CACHE_MAX_MB) */
+  EMBED_CACHE_MAX_MB: envInt("TAXI_EMBED_CACHE_MAX_MB", 256),
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// IDENTITY
+// ══════════════════════════════════════════════════════════════════════
+
+export const IDENTITY = {
+  /** Canonical MCP registration and protocol-facing server name. */
+  MCP_SERVER_NAME: "taxi",
+  /** User-Agent for HTTP requests to external APIs */
+  USER_AGENT: envStr("TAXI_USER_AGENT", "Taxi/1.0 (https://github.com/heznpc/Taxi)"),
+  /** Default HTTP server port */
+  HTTP_PORT: envInt("TAXI_HTTP_PORT", 3848),
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// FILE PATHS
+// ══════════════════════════════════════════════════════════════════════
+
+export const PATHS = {
+  /** Config directory */
+  CONFIG_DIR: join(HOME, ".config", "taxi"),
+  /** User config file */
+  CONFIG: resolveTilde(envStr("TAXI_CONFIG_PATH", "~/.config/taxi/config.json")),
+  /** HITL socket (env override keeps acceptance/dev harnesses isolated) */
+  HITL_SOCKET: resolveTilde(envStr("TAXI_HITL_SOCKET_PATH", join(HOME, ".taxi", "hitl.sock"))),
+  /** Vector store directory (env: TAXI_VECTOR_STORE_DIR — primarily for tests) */
+  VECTOR_STORE: resolveTilde(envStr("TAXI_VECTOR_STORE_DIR", join(HOME, ".taxi"))),
+  /** Context-memory index directory (facts / entities / episodes). */
+  MEMORY_DIR: join(HOME, ".cache", "taxi"),
+  /** Context-memory JSON store (env override is primarily for isolated validation). */
+  MEMORY_STORE: resolveTilde(envStr("TAXI_MEMORY_STORE_PATH", join(HOME, ".cache", "taxi", "memory.json"))),
+  /** Usage profile (env: TAXI_USAGE_PROFILE_PATH — primarily for tests) */
+  USAGE_PROFILE: resolveTilde(envStr("TAXI_USAGE_PROFILE_PATH", join(HOME, ".taxi", "profile.json"))),
+  /** Temp directory for screenshots, recordings, intermediate exports */
+  TEMP_DIR: envStr("TAXI_TEMP_DIR", tmpdir()),
+} as const;
+
+// ══════════════════════════════════════════════════════════════════════
+// AUDIT LOG
+// ══════════════════════════════════════════════════════════════════════
+
+let _auditFlushInterval: number | undefined;
+
+export const AUDIT = {
+  /** Max length of a single argument value before truncation in audit log */
+  MAX_ARG_LENGTH: 500,
+  /** Max size of a single audit entry (JSON line) before placeholder substitution */
+  MAX_ENTRY_SIZE: 10_000,
+  /** Hard in-memory audit spool bound while disk persistence is unavailable */
+  MAX_BUFFER_SIZE: envInt("TAXI_AUDIT_MAX_BUFFER_BYTES", 8 * 1024 * 1024),
+  /** Max audit log file size before rotation */
+  MAX_FILE_SIZE: 10 * 1024 * 1024,
+  /** Max consecutive flush failures before disabling audit */
+  MAX_FLUSH_FAILURES: 5,
+  /** Buffer flush interval (ms) — lazy-once so config.ts can set env before first read */
+  get FLUSH_INTERVAL() {
+    return (_auditFlushInterval ??= envInt("TAXI_AUDIT_FLUSH_INTERVAL", 30_000));
+  },
+};

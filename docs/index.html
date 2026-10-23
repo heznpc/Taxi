@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="meta_title">Taxi by Heznpc — A Local AI Workspace</title>
+  <meta name="description" data-i18n-attr="content" data-i18n="meta_description" content="A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences and governed Mac tools.">
+  <meta name="author" content="Heznpc">
+  <meta name="theme-color" content="#0e1117">
+  <link rel="canonical" href="https://heznpc.github.io/Taxi/">
+  <link rel="icon" type="image/png" sizes="32x32" href="taxi-icon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="taxi-icon-16.png">
+  <link rel="apple-touch-icon" sizes="256x256" href="taxi-icon-256.png">
+  <!-- Open Graph -->
+  <meta property="og:title" content="Taxi by Heznpc — A Local AI Workspace">
+  <meta property="og:description" content="A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences and governed Mac tools.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://heznpc.github.io/Taxi/">
+  <meta property="og:image" content="https://heznpc.github.io/Taxi/taxi-icon-512.png">
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Taxi by Heznpc — A Local AI Workspace">
+  <meta name="twitter:description" content="A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences and governed Mac tools.">
+  <meta name="twitter:image" content="https://heznpc.github.io/Taxi/taxi-icon-512.png">
+  <!-- Structured Data -->
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "@id": "https://heznpc.github.io/Taxi/#software",
+  "name": "Taxi",
+  "alternateName": "Taxi by Heznpc",
+  "identifier": "io.github.heznpc/taxi",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS",
+  "description": "A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences and governed Mac tools.",
+  "url": "https://heznpc.github.io/Taxi/",
+  "author": {
+    "@type": "Person",
+    "name": "Heznpc",
+    "url": "https://github.com/heznpc"
+  },
+  "sameAs": [
+    "https://github.com/heznpc/Taxi"
+  ],
+  "license": "https://opensource.org/licenses/MIT",
+  "softwareVersion": "1.0.0"
+}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['-apple-system','BlinkMacSystemFont','Helvetica Neue','Helvetica','Arial','sans-serif'],
+            mono: ['JetBrains Mono','ui-monospace','monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="font-sans antialiased overflow-x-hidden leading-relaxed">
+
+  <!-- Ambient orbs -->
+  <div class="scene" aria-hidden="true">
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="orb orb-c"></div>
+  </div>
+
+  <!-- Nav -->
+  <nav class="glass-nav" id="nav">
+    <div class="max-w-[1080px] mx-auto px-5 flex items-center justify-between h-full">
+      <a href="#" class="flex items-center gap-2 font-mono text-sm font-medium opacity-80 tracking-tight"><img src="taxi-icon-32.png" alt="" width="24" height="24">Taxi</a>
+      <div class="flex items-center gap-6" id="navLinks">
+        <a href="#modules" class="text-sm opacity-45 font-medium hover:opacity-90 transition-opacity" data-i18n="nav_modules">Modules</a>
+        <a href="#beyond-siri" class="text-sm opacity-45 font-medium hover:opacity-90 transition-opacity" data-i18n="nav_beyond">Beyond Siri</a>
+        <a href="#workflows" class="text-sm opacity-45 font-medium hover:opacity-90 transition-opacity" data-i18n="nav_workflows">Workflows</a>
+        <a href="#install" class="text-sm opacity-45 font-medium hover:opacity-90 transition-opacity" data-i18n="nav_install">Build from source</a>
+        <a href="https://github.com/heznpc/Taxi" target="_blank" rel="noopener" class="text-sm opacity-45 font-medium hover:opacity-90 transition-opacity">GitHub</a>
+        <button class="pill-btn" id="themeToggle" aria-label="Toggle theme">
+          <span class="theme-icon">☀</span>
+        </button>
+        <div class="lang-select" id="langSelect">
+          <button class="pill-btn" id="langToggle" aria-label="Select language">
+            <span data-i18n="lang_label">EN</span>
+            <svg class="inline ml-1 -mr-1" width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 3l2 2 2-2"/></svg>
+          </button>
+          <div class="lang-dropdown" id="langDropdown">
+            <button data-lang="en">English</button>
+            <button data-lang="ko">한국어</button>
+            <button data-lang="ja">日本語</button>
+            <button data-lang="zh-CN">简体中文</button>
+            <button data-lang="zh-TW">繁體中文</button>
+            <button data-lang="es">Español</button>
+            <button data-lang="fr">Français</button>
+            <button data-lang="de">Deutsch</button>
+            <button data-lang="pt">Português</button>
+          </div>
+        </div>
+      </div>
+      <button class="nav-mobile" id="mobileToggle" aria-label="Menu"><span></span><span></span></button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <header class="relative z-[1] pt-[calc(56px+100px)] pb-16 text-center">
+    <div class="max-w-[1080px] mx-auto px-5">
+      <p class="font-mono text-sm opacity-30 tracking-tight mb-6 reveal" data-i18n="hero_tag">Source preview · build from source</p>
+      <div class="flex flex-col items-center gap-5 reveal" data-delay="60">
+        <img src="taxi-icon-256.png" alt="Taxi" width="120" height="120">
+        <h1 class="text-[clamp(3.6rem,10vw,7rem)] leading-[.98] tracking-tighter hero-h1"><span class="font-bold">Taxi</span></h1>
+      </div>
+      <p class="mt-5 text-xl opacity-50 font-medium reveal" data-delay="90" data-i18n="hero_tagline">A local workspace for coordinating AI sessions and tools.</p>
+      <p class="mt-3 text-base opacity-30 max-w-[50ch] mx-auto leading-relaxed reveal" data-delay="120" data-i18n="hero_sub">Task Dashboard, session handoffs, phase model preferences and governed Mac tools. Build from source on macOS.</p>
+      <div class="flex gap-3 justify-center mt-10 reveal" data-delay="160">
+        <a href="#install" class="lg-btn" data-i18n="hero_cta">Build from source</a>
+        <a href="https://github.com/heznpc/Taxi#build-from-source" target="_blank" rel="noopener" class="lg-btn lg-btn--ghost" data-i18n="hero_releases">View source</a>
+        <a href="https://github.com/heznpc/Taxi/discussions" target="_blank" rel="noopener" class="lg-btn lg-btn--ghost"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 10h.01"/><path d="M12 10h.01"/><path d="M16 10h.01"/></svg><span data-i18n="hero_discussions">Discussions</span></a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Governance proof points -->
+  <section class="relative z-[1] pb-20">
+    <div class="max-w-[720px] mx-auto px-5">
+      <div class="grid grid-cols-4 gap-3 max-sm:grid-cols-2 reveal" data-delay="200">
+        <div class="glass-stat">
+          <div class="glass-fx"></div>
+          <div class="glass-tint"></div>
+          <div class="glass-content text-center py-5">
+            <div class="text-2xl font-bold tracking-tight">macOS</div>
+            <div class="text-xs opacity-35 mt-1" data-i18n="stat_local">Local runtime</div>
+          </div>
+        </div>
+        <div class="glass-stat">
+          <div class="glass-fx"></div>
+          <div class="glass-tint"></div>
+          <div class="glass-content text-center py-5">
+            <div class="text-2xl font-bold tracking-tight">HITL</div>
+            <div class="text-xs opacity-35 mt-1" data-i18n="stat_approval">Per-call approval</div>
+          </div>
+        </div>
+        <div class="glass-stat">
+          <div class="glass-fx"></div>
+          <div class="glass-tint"></div>
+          <div class="glass-content text-center py-5">
+            <div class="text-2xl font-bold tracking-tight">HMAC</div>
+            <div class="text-xs opacity-35 mt-1" data-i18n="stat_audit">Audit chain</div>
+          </div>
+        </div>
+        <div class="glass-stat">
+          <div class="glass-fx"></div>
+          <div class="glass-tint"></div>
+          <div class="glass-content text-center py-5">
+            <div class="text-2xl font-bold tracking-tight">MCP</div>
+            <div class="text-xs opacity-35 mt-1" data-i18n="stat_clients">Any client</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Apple platform direction -->
+  <section class="relative z-[1] pb-20">
+    <div class="max-w-[860px] mx-auto px-5 text-center">
+      <p class="section-label reveal" data-i18n="platforms_label">Current scope</p>
+      <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="platforms_title">Explicit work, visible boundaries.</h2>
+      <p class="mt-3 text-sm opacity-35 max-w-[62ch] mx-auto reveal" data-delay="80" data-i18n="platforms_sub">Read-only Codex execution; imported sessions are observation-only. Autonomous execution, external resume and compression relay are planned.</p>
+    </div>
+  </section>
+
+  <!-- Modules -->
+  <section id="modules" class="relative z-[1] py-10 pb-24">
+    <div class="max-w-[1080px] mx-auto px-5">
+      <div class="text-center mb-10">
+        <p class="section-label reveal" data-i18n="modules_label">Modules</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="modules_title">One server. Every Apple app.</h2>
+        <p class="mt-3 text-sm opacity-35 max-w-[48ch] mx-auto reveal" data-delay="80" data-i18n="modules_sub">Native. Fast. Built on AppleScript and Apple frameworks.</p>
+      </div>
+
+      <div class="flex gap-1.5 mb-9 flex-wrap justify-center reveal" data-delay="100">
+        <button class="pill-btn active" data-filter="all" data-i18n="filter_all">All</button>
+        <button class="pill-btn" data-filter="productivity" data-i18n="filter_productivity">Productivity</button>
+        <button class="pill-btn" data-filter="media" data-i18n="filter_media">Media</button>
+        <button class="pill-btn" data-filter="system" data-i18n="filter_system">System</button>
+        <button class="pill-btn" data-filter="advanced" data-i18n="filter_advanced">Advanced</button>
+      </div>
+
+      <div class="grid grid-cols-3 gap-4 max-lg:grid-cols-2 max-sm:grid-cols-1" id="moduleGrid">
+
+        <!-- Productivity -->
+        <div class="glass-card reveal" data-category="productivity" data-detail="detail_notes" data-mod-key="notes">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="notes"></span>
+            <h3 class="card-title" data-i18n="mod_notes">Notes</h3>
+            <p class="card-desc" data-i18n="mod_notes_p">Create, search, and manage Apple Notes.</p>
+            <code class="card-tags" data-i18n="mod_notes_t">12 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="productivity" data-delay="40" data-detail="detail_reminders" data-mod-key="reminders">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="reminders"></span>
+            <h3 class="card-title" data-i18n="mod_reminders">Reminders</h3>
+            <p class="card-desc" data-i18n="mod_reminders_p">Manage lists, due dates, and priorities.</p>
+            <code class="card-tags" data-i18n="mod_reminders_t">11 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="productivity" data-delay="80" data-detail="detail_calendar" data-mod-key="calendar">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="calendar"></span>
+            <h3 class="card-title" data-i18n="mod_calendar">Calendar</h3>
+            <p class="card-desc" data-i18n="mod_calendar_p">Events, schedules, and availability.</p>
+            <code class="card-tags" data-i18n="mod_calendar_t">10 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="productivity" data-delay="40" data-detail="detail_contacts" data-mod-key="contacts">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="contacts"></span>
+            <h3 class="card-title" data-i18n="mod_contacts">Contacts</h3>
+            <p class="card-desc" data-i18n="mod_contacts_p">Search, create, and update contacts.</p>
+            <code class="card-tags" data-i18n="mod_contacts_t">10 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="productivity" data-delay="80" data-detail="detail_mail" data-mod-key="mail">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="mail"></span>
+            <h3 class="card-title" data-i18n="mod_mail">Mail</h3>
+            <p class="card-desc" data-i18n="mod_mail_p">Read, compose, and manage email.</p>
+            <code class="card-tags" data-i18n="mod_mail_t">11 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="productivity" data-delay="120" data-detail="detail_messages" data-mod-key="messages">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="messages"></span>
+            <h3 class="card-title" data-i18n="mod_messages">Messages</h3>
+            <p class="card-desc" data-i18n="mod_messages_p">Read and send iMessages.</p>
+            <code class="card-tags" data-i18n="mod_messages_t">6 tools</code>
+          </div>
+        </div>
+
+        <!-- Media -->
+        <div class="glass-card reveal" data-category="media" data-detail="detail_music" data-mod-key="music">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="music"></span>
+            <h3 class="card-title" data-i18n="mod_music">Music</h3>
+            <p class="card-desc" data-i18n="mod_music_p">Playback, playlists, and library control.</p>
+            <code class="card-tags" data-i18n="mod_music_t">13 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="media" data-delay="40" data-detail="detail_photos" data-mod-key="photos">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="photos"></span>
+            <h3 class="card-title" data-i18n="mod_photos">Photos</h3>
+            <p class="card-desc" data-i18n="mod_photos_p">Albums, search, and metadata.</p>
+            <code class="card-tags" data-i18n="mod_photos_t">9 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="media" data-delay="80" data-detail="detail_tv" data-mod-key="tv">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="tv"></span>
+            <h3 class="card-title" data-i18n="mod_tv">TV</h3>
+            <p class="card-desc" data-i18n="mod_tv_p">Browse and control Apple TV app.</p>
+            <code class="card-tags" data-i18n="mod_tv_t">6 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="media" data-delay="120" data-detail="detail_podcasts" data-mod-key="podcasts">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="podcasts"></span>
+            <h3 class="card-title" data-i18n="mod_podcasts">Podcasts</h3>
+            <p class="card-desc" data-i18n="mod_podcasts_p">Browse shows and control playback.</p>
+            <code class="card-tags" data-i18n="mod_podcasts_t">6 tools</code>
+          </div>
+        </div>
+
+        <!-- System -->
+        <div class="glass-card reveal" data-category="system" data-detail="detail_system" data-mod-key="system">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="system"></span>
+            <h3 class="card-title" data-i18n="mod_system">System</h3>
+            <p class="card-desc" data-i18n="mod_system_p">Dark mode, volume, WiFi, Bluetooth, and more.</p>
+            <code class="card-tags" data-i18n="mod_system_t">27 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="system" data-delay="40" data-detail="detail_finder" data-mod-key="finder">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="finder"></span>
+            <h3 class="card-title" data-i18n="mod_finder">Finder</h3>
+            <p class="card-desc" data-i18n="mod_finder_p">Browse, move, and organize files.</p>
+            <code class="card-tags" data-i18n="mod_finder_t">8 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="system" data-delay="80" data-detail="detail_safari" data-mod-key="safari">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="safari"></span>
+            <h3 class="card-title" data-i18n="mod_safari">Safari</h3>
+            <p class="card-desc" data-i18n="mod_safari_p">Tabs, reading list, and page content.</p>
+            <code class="card-tags" data-i18n="mod_safari_t">12 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="system" data-delay="120" data-detail="detail_screen" data-mod-key="screen">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="screen"></span>
+            <h3 class="card-title" data-i18n="mod_screen">Screen</h3>
+            <p class="card-desc" data-i18n="mod_screen_p">Screenshot and screen capture.</p>
+            <code class="card-tags" data-i18n="mod_screen_t">5 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="system" data-delay="160" data-detail="detail_maps" data-mod-key="maps">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="maps"></span>
+            <h3 class="card-title" data-i18n="mod_maps">Maps</h3>
+            <p class="card-desc" data-i18n="mod_maps_p">Search locations and get directions.</p>
+            <code class="card-tags" data-i18n="mod_maps_t">8 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="system" data-delay="200" data-detail="detail_location" data-mod-key="location">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="location"></span>
+            <h3 class="card-title" data-i18n="mod_location">Location</h3>
+            <p class="card-desc" data-i18n="mod_location_p">GPS coordinates and location services.</p>
+            <code class="card-tags" data-i18n="mod_location_t">2 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="system" data-delay="240" data-detail="detail_bluetooth" data-mod-key="bluetooth">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="bluetooth"></span>
+            <h3 class="card-title" data-i18n="mod_bluetooth">Bluetooth</h3>
+            <p class="card-desc" data-i18n="mod_bluetooth_p">Scan, connect, and manage BLE devices.</p>
+            <code class="card-tags" data-i18n="mod_bluetooth_t">4 tools</code>
+          </div>
+        </div>
+
+        <!-- Advanced -->
+        <div class="glass-card reveal" data-category="advanced" data-detail="detail_shortcuts" data-mod-key="shortcuts">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="shortcuts"></span>
+            <h3 class="card-title" data-i18n="mod_shortcuts">Shortcuts</h3>
+            <p class="card-desc" data-i18n="mod_shortcuts_p">Run and manage Shortcuts automations.</p>
+            <code class="card-tags" data-i18n="mod_shortcuts_t">11 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="advanced" data-delay="40" data-detail="detail_intelligence" data-mod-key="intelligence">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <small class="card-badge" data-i18n="badge_macos26">macOS 26+</small>
+            <span class="mod-icon" data-mod="intelligence"></span>
+            <h3 class="card-title" data-i18n="mod_intelligence">Intelligence</h3>
+            <p class="card-desc" data-i18n="mod_intelligence_p">Apple Intelligence writing tools and image generation.</p>
+            <code class="card-tags" data-i18n="mod_intelligence_t">8 tools</code>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-category="advanced" data-delay="80" data-detail="detail_ui" data-mod-key="ui">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <span class="mod-icon" data-mod="ui"></span>
+            <h3 class="card-title" data-i18n="mod_ui">UI Automation</h3>
+            <p class="card-desc" data-i18n="mod_ui_p">Accessibility-based UI inspection and control.</p>
+            <code class="card-tags" data-i18n="mod_ui_t">6 tools</code>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section class="relative z-[1] py-20">
+    <div class="max-w-[1080px] mx-auto px-5">
+      <div class="text-center mb-12">
+        <p class="section-label reveal" data-i18n="how_label">How It Works</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="how_title">Build, coordinate, review.</h2>
+      </div>
+      <div class="grid grid-cols-3 gap-4 max-md:grid-cols-1">
+        <div class="glass-card reveal" data-delay="40">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content text-center py-10">
+            <div class="step-num">1</div>
+            <h3 class="card-title mt-4 mb-2" data-i18n="step1_title">Build from source</h3>
+            <p class="card-desc" data-i18n="step1_desc">Install dependencies and compile the local runtime.</p>
+            <code class="inline-block mt-4 px-4 py-2 rounded-lg text-xs font-mono opacity-50 bg-white/[.04]">npm ci &amp;&amp; npm run build</code>
+          </div>
+        </div>
+        <div class="glass-card reveal" data-delay="80">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content text-center py-10">
+            <div class="step-num">2</div>
+            <h3 class="card-title mt-4 mb-2" data-i18n="step2_title">Coordinate</h3>
+            <p class="card-desc" data-i18n="step2_desc">Record task phases, model preferences and child-session handoffs.</p>
+          </div>
+        </div>
+        <div class="glass-card reveal" data-delay="120">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content text-center py-10">
+            <div class="step-num">3</div>
+            <h3 class="card-title mt-4 mb-2" data-i18n="step3_title">Review</h3>
+            <p class="card-desc" data-i18n="step3_desc">Inspect results and evidence; provider completion is not goal completion.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Config -->
+  <section class="relative z-[1] py-16">
+    <div class="max-w-[860px] mx-auto px-5">
+      <div class="glass-card reveal">
+        <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+        <div class="glass-content">
+          <div class="flex items-center gap-2 mb-5 pb-4 border-b border-white/[.06]">
+            <span class="w-3 h-3 rounded-full bg-[#ff5f57]"></span>
+            <span class="w-3 h-3 rounded-full bg-[#febc2e]"></span>
+            <span class="w-3 h-3 rounded-full bg-[#28c840]"></span>
+            <span class="font-mono text-xs opacity-30 ml-2">mcp-config.json</span>
+          </div>
+          <pre class="font-mono text-sm leading-7 config-code">{
+  <span class="c-key">"mcpServers"</span>: {
+    <span class="c-key">"taxi"</span>: {
+      <span class="c-key">"command"</span>: <span class="c-str">"node"</span>,
+      <span class="c-key">"args"</span>: [<span class="c-str">"/absolute/path/to/Taxi/dist/index.js"</span>, <span class="c-str">"run"</span>]
+    }
+  }
+}</pre>
+          <p class="mt-5 text-sm opacity-30" data-i18n="config_desc">After building, replace the absolute path with your checkout and add this local entry to your MCP client.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Try It — Interactive Terminal Playground -->
+  <section id="tryit" class="relative z-[1] py-10 pb-24">
+    <div class="max-w-[1080px] mx-auto px-5">
+      <div class="text-center mb-10">
+        <p class="section-label reveal" data-i18n="tryit_label">Example interaction</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="tryit_title">Just ask. In plain language.</h2>
+        <p class="mt-3 text-sm opacity-35 max-w-[48ch] mx-auto reveal" data-delay="80" data-i18n="tryit_sub">Illustrative terminal output only. These examples do not run tools or access your Mac.</p>
+      </div>
+
+      <!-- Terminal simulator -->
+      <div class="reveal" data-delay="40">
+        <div class="term-window">
+          <div class="term-titlebar">
+            <span class="term-dot" style="background:#ff5f57"></span>
+            <span class="term-dot" style="background:#febc2e"></span>
+            <span class="term-dot" style="background:#28c840"></span>
+            <span class="term-titlebar-text">Taxi — Terminal</span>
+          </div>
+          <div class="term-body" id="termBody">
+            <div class="term-line"><span class="term-prompt">❯</span> <span class="term-dim">Click a prompt below to start...</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt cards -->
+      <div class="grid grid-cols-3 gap-3 mt-6 max-md:grid-cols-2 max-sm:grid-cols-1">
+        <button class="term-prompt-card reveal" data-delay="60" onclick="runDemo(0)">
+          <span class="wf-tag">Everyday</span>
+          <span class="term-prompt-text" data-i18n="tryit_1">"Read my latest notes and summarize them"</span>
+        </button>
+        <button class="term-prompt-card reveal" data-delay="80" onclick="runDemo(1)">
+          <span class="wf-tag">Productivity</span>
+          <span class="term-prompt-text" data-i18n="tryit_2">"What's on my calendar today?"</span>
+        </button>
+        <button class="term-prompt-card reveal" data-delay="100" onclick="runDemo(2)">
+          <span class="wf-tag">System</span>
+          <span class="term-prompt-text" data-i18n="tryit_3">"Turn on dark mode, set volume to 50%"</span>
+        </button>
+        <button class="term-prompt-card reveal" data-delay="120" onclick="runDemo(3)">
+          <span class="wf-tag">Research</span>
+          <span class="term-prompt-text" data-i18n="tryit_4">"Summarize the open Safari page"</span>
+        </button>
+        <button class="term-prompt-card reveal" data-delay="140" onclick="runDemo(4)">
+          <span class="wf-tag">Location</span>
+          <span class="term-prompt-text" data-i18n="tryit_5">"Get current location and show weather"</span>
+        </button>
+        <button class="term-prompt-card reveal" data-delay="160" onclick="runDemo(5)">
+          <span class="wf-tag">Cross-App</span>
+          <span class="term-prompt-text" data-i18n="tryit_6">"Today's meetings → related notes → prep checklist"</span>
+        </button>
+      </div>
+      <p class="text-center mt-6 text-sm opacity-25 reveal" data-delay="200" data-i18n="tryit_footer">Taxi keeps sessions, models and tools in one local workflow.</p>
+    </div>
+  </section>
+
+  <script>
+  const demos = [
+    { prompt: "Read my latest notes and summarize them", steps: [
+      { tool: "list_notes", args: "folder: \"All Notes\", limit: 5", delay: 600 },
+      { result: "Found 5 notes: \"Project Ideas\", \"Meeting Notes 3/15\", \"Reading List\", \"Travel Plans\", \"Recipe Collection\"", delay: 400 },
+      { tool: "read_note", args: "name: \"Meeting Notes 3/15\"", delay: 500 },
+      { result: "Content: Sprint review outcomes, Q2 roadmap alignment, design system migration timeline...", delay: 300 },
+      { summary: "Your latest notes cover: a sprint review with 3 action items, Q2 roadmap changes, and a design system migration planned for April.", delay: 200 },
+    ]},
+    { prompt: "What's on my calendar today?", steps: [
+      { tool: "today_events", args: "", delay: 600 },
+      { result: "3 events found for today (March 16, 2026)", delay: 400 },
+      { summary: "📅 Today's schedule:\n  09:00  Team standup (30 min)\n  11:00  Design review with Sarah (1 hr)\n  14:30  1:1 with manager (45 min)\n\nNo conflicts. Next event in 2 hours.", delay: 200 },
+    ]},
+    { prompt: "Turn on dark mode, set volume to 50%", steps: [
+      { tool: "set_appearance", args: "mode: \"dark\"", delay: 500 },
+      { result: "✓ Dark mode enabled", delay: 300 },
+      { tool: "set_volume", args: "level: 50", delay: 400 },
+      { result: "✓ Volume set to 50%", delay: 300 },
+      { summary: "Done. Dark mode is on and volume is at 50%.", delay: 200 },
+    ]},
+    { prompt: "Summarize the open Safari page", steps: [
+      { tool: "get_active_tab", args: "", delay: 600 },
+      { result: "Active tab: \"Apple Developer Documentation — SwiftUI\" (developer.apple.com)", delay: 400 },
+      { tool: "read_page_content", args: "tabIndex: 0", delay: 700 },
+      { result: "Extracted 2,847 words from page content", delay: 300 },
+      { summary: "This Apple Developer page covers SwiftUI's declarative syntax for building UIs across all Apple platforms, with sections on views, state management, and the new Observable macro.", delay: 200 },
+    ]},
+    { prompt: "Get current location and show weather", steps: [
+      { tool: "get_current_location", args: "", delay: 800 },
+      { result: "Location: 37.5665° N, 126.9780° E (Seoul, South Korea)", delay: 400 },
+      { tool: "get_weather", args: "latitude: 37.5665, longitude: 126.978", delay: 600 },
+      { result: "Weather data retrieved for Seoul", delay: 300 },
+      { summary: "📍 Seoul, South Korea\n🌤 Currently 14°C, partly cloudy\n💨 Wind: 12 km/h NW\n🌧 Rain probability: 15%\n📅 High 17° / Low 8°", delay: 200 },
+    ]},
+    { prompt: "Today's meetings → related notes → prep checklist", steps: [
+      { tool: "today_events", args: "", delay: 600 },
+      { result: "Found: \"Design Review\" at 11:00 with Sarah", delay: 400 },
+      { tool: "search_notes", args: "query: \"design review\"", delay: 500 },
+      { result: "Found 2 notes: \"Design System v2 Spec\", \"UI Audit Results\"", delay: 300 },
+      { tool: "create_reminder", args: "title: \"Design Review Prep\", list: \"Work\"", delay: 500 },
+      { result: "✓ Created reminder with 3 sub-items", delay: 300 },
+      { summary: "Prep checklist created in Reminders:\n  □ Review \"Design System v2 Spec\" note\n  □ Check \"UI Audit Results\" for open issues\n  □ Prepare component migration timeline for Sarah", delay: 200 },
+    ]},
+  ];
+  let demoRunning = false;
+  function runDemo(idx) {
+    if (demoRunning) return;
+    demoRunning = true;
+    const d = demos[idx], body = document.getElementById('termBody');
+    body.innerHTML = '';
+    let totalDelay = 0;
+    // Type the user prompt
+    const promptLine = document.createElement('div');
+    promptLine.className = 'term-line';
+    promptLine.innerHTML = '<span class="term-prompt">❯</span> <span class="term-user"></span>';
+    body.appendChild(promptLine);
+    const userSpan = promptLine.querySelector('.term-user');
+    const chars = d.prompt.split('');
+    chars.forEach((ch, i) => {
+      setTimeout(() => { userSpan.textContent += ch; body.scrollTop = body.scrollHeight; }, i * 25);
+    });
+    totalDelay = chars.length * 25 + 400;
+    // Show steps
+    d.steps.forEach(step => {
+      totalDelay += step.delay;
+      setTimeout(() => {
+        const line = document.createElement('div');
+        line.className = 'term-line term-fade-in';
+        if (step.tool) {
+          line.innerHTML = `<span class="term-tool">⚡ ${step.tool}</span><span class="term-args">(${step.args})</span>`;
+        } else if (step.result) {
+          line.innerHTML = `<span class="term-result">${step.result}</span>`;
+        } else if (step.summary) {
+          line.innerHTML = `<span class="term-summary">${step.summary.replace(/\n/g,'<br>')}</span>`;
+        }
+        body.appendChild(line);
+        body.scrollTop = body.scrollHeight;
+      }, totalDelay);
+      totalDelay += 300;
+    });
+    setTimeout(() => { demoRunning = false; }, totalDelay + 500);
+  }
+  </script>
+
+  <!-- Workflows -->
+  <!-- Beyond Siri — five concrete things Siri / Shortcuts cannot do -->
+  <section id="beyond-siri" class="relative z-[1] py-10 pb-24">
+    <div class="max-w-[1080px] mx-auto px-5">
+      <div class="text-center mb-10">
+        <p class="section-label reveal" data-i18n="bs_label">Beyond Siri</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="bs_title">Examples of configured Mac workflows.</h2>
+        <p class="mt-3 text-sm opacity-35 max-w-[52ch] mx-auto reveal" data-delay="80" data-i18n="bs_sub">Built-in skills and tools require the relevant modules, permissions and explicit setup. Event triggers are configured workflows, not a general autonomous agent.</p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+        <!-- 1 -->
+        <div class="glass-card reveal">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag" data-i18n="mod_mail">Mail</span>
+              <span class="wf-tag">Reminders</span>
+              <span class="wf-tag">loop</span>
+            </div>
+            <h3 class="card-title" data-i18n="bs_1_title">Turn newsletter inbox into a to-do list</h3>
+            <p class="card-desc" data-i18n="bs_1_desc">The sender-to-tasks skill can turn matching mail into follow-up reminders, with per-item retry and configured approval controls.</p>
+          </div>
+        </div>
+
+        <!-- 2 -->
+        <div class="glass-card reveal" data-delay="40">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Reminders</span>
+              <span class="wf-tag">Notes</span>
+              <span class="wf-tag">trigger</span>
+            </div>
+            <h3 class="card-title" data-i18n="bs_2_title">A journal that writes itself when you walk away</h3>
+            <p class="card-desc" data-i18n="bs_2_desc">After enabling the evening-winddown skill and its trigger, screen locking can gather events and reminders and create a journal note, subject to runtime permissions and approval policy.</p>
+          </div>
+        </div>
+
+        <!-- 3 -->
+        <div class="glass-card reveal" data-delay="80">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Reminders</span>
+              <span class="wf-tag">MCP App</span>
+            </div>
+            <h3 class="card-title" data-i18n="bs_3_title">Today's events + due reminders on one timeline</h3>
+            <p class="card-desc" data-i18n="bs_3_desc">One tool call — <code class="font-mono text-[.9em]">timeline_today</code> — renders an interactive 6am→10pm axis that fuses Calendar and Reminders into a single view with an Unscheduled rail on the right. No more flipping between two apps.</p>
+          </div>
+        </div>
+
+        <!-- 4 -->
+        <div class="glass-card reveal" data-delay="120">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Safari</span>
+              <span class="wf-tag">Pasteboard</span>
+              <span class="wf-tag">trigger</span>
+            </div>
+            <h3 class="card-title" data-i18n="bs_4_title">Copy a URL, land in Reading List — automatically</h3>
+            <p class="card-desc" data-i18n="bs_4_desc">After enabling clipboard-url-to-reading and its trigger, a copied URL can be queued in Safari Reading List. Required modules, permissions and approval policy still apply.</p>
+          </div>
+        </div>
+
+        <!-- 5 — wide card -->
+        <div class="glass-card col-span-2 max-md:col-span-1 reveal" data-delay="160">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Audit</span>
+              <span class="wf-tag">Rate limit</span>
+              <span class="wf-tag">Kill switch</span>
+            </div>
+            <h3 class="card-title" data-i18n="bs_5_title">Ask your Mac what the AI did this week</h3>
+            <p class="card-desc" data-i18n="bs_5_desc">Inspect locally retained tool-call evidence with audit_summary and audit_log. Audit metadata does not automatically verify the whole task; redact diagnostics before sharing.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="workflows" class="relative z-[1] py-10 pb-24">
+    <div class="max-w-[1080px] mx-auto px-5">
+      <div class="text-center mb-10">
+        <p class="section-label reveal" data-i18n="wf_label">Workflows</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="wf_title">Prompts that connect everything.</h2>
+        <p class="mt-3 text-sm opacity-35 max-w-[48ch] mx-auto reveal" data-delay="80" data-i18n="wf_sub">Pre-built prompts that orchestrate multiple Apple apps together.</p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+        <div class="glass-card reveal">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Reminders</span>
+              <span class="wf-tag">Mail</span>
+              <span class="wf-tag">Notes</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">daily-briefing</code></h3>
+            <p class="card-desc" data-i18n="wf_daily">Summarize today's events, due reminders, unread mail, and recent notes.</p>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="40">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Notes</span>
+              <span class="wf-tag">Reminders</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">weekly-digest</code></h3>
+            <p class="card-desc" data-i18n="wf_weekly">Review the past week and plan ahead.</p>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="40">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Notes</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">meeting-prep</code></h3>
+            <p class="card-desc" data-i18n="wf_meeting">Pull event details, search notes, build context.</p>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="80">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Safari</span>
+              <span class="wf-tag">Notes</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">research-with-safari</code></h3>
+            <p class="card-desc" data-i18n="wf_research">Research topics using Safari, save findings to Notes.</p>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="80">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Reminders</span>
+              <span class="wf-tag">Music</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">focus-session</code></h3>
+            <p class="card-desc" data-i18n="wf_focus">Check conflicts, prioritize reminders, manage music.</p>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="120">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Finder</span>
+              <span class="wf-tag">Notes</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">file-organizer</code></h3>
+            <p class="card-desc" data-i18n="wf_file">Scan a folder, categorize, summarize in Notes.</p>
+          </div>
+        </div>
+
+        <div class="glass-card col-span-2 max-md:col-span-1 reveal" data-delay="120">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content">
+            <div class="flex gap-1.5 mb-3 flex-wrap">
+              <span class="wf-tag">Calendar</span>
+              <span class="wf-tag">Notes</span>
+              <span class="wf-tag">Reminders</span>
+            </div>
+            <h3 class="card-title"><code class="font-mono text-[.85em] opacity-80">event-follow-up</code></h3>
+            <p class="card-desc" data-i18n="wf_followup">After a meeting, create follow-up notes and action items automatically.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Why Taxi? -->
+  <section id="why" class="relative z-[1] py-10 pb-24">
+    <div class="max-w-[860px] mx-auto px-5">
+      <div class="text-center mb-10">
+        <p class="section-label reveal" data-i18n="why_label">Why Taxi?</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="why_title">Sessions, models and tools in one workspace.</h2>
+        <p class="mt-3 text-sm opacity-35 max-w-[48ch] mx-auto reveal" data-delay="80" data-i18n="why_sub">Keep the work and its execution boundaries together.</p>
+      </div>
+
+      <div class="grid gap-4">
+        <div class="glass-card reveal" data-delay="40" style="cursor:default">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content flex-row items-start gap-4" style="flex-direction:row">
+            <div class="step-num shrink-0 text-lg" style="width:44px;height:44px;font-size:1.1rem">1</div>
+            <div>
+              <h3 class="card-title" data-i18n="why_1_title">Coordinate the whole task</h3>
+              <p class="card-desc mt-1" data-i18n="why_1_desc">Task Dashboard connects session relationships, phase model preferences and governed MCP tools for Mac apps.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="80" style="cursor:default">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content flex-row items-start gap-4" style="flex-direction:row">
+            <div class="step-num shrink-0 text-lg" style="width:44px;height:44px;font-size:1.1rem">2</div>
+            <div>
+              <h3 class="card-title" data-i18n="why_2_title">Governed execution</h3>
+              <p class="card-desc mt-1" data-i18n="why_2_desc">Explicit permissions, per-call approval controls, audit evidence and an emergency stop govern execution.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="120" style="cursor:default">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content flex-row items-start gap-4" style="flex-direction:row">
+            <div class="step-num shrink-0 text-lg" style="width:44px;height:44px;font-size:1.1rem">3</div>
+            <div>
+              <h3 class="card-title" data-i18n="why_3_title">Works with any MCP client</h3>
+              <p class="card-desc mt-1" data-i18n="why_3_desc">Claude Code, Codex, Cursor, Windsurf, and every client that speaks the MCP protocol.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="160" style="cursor:default">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content flex-row items-start gap-4" style="flex-direction:row">
+            <div class="step-num shrink-0 text-lg" style="width:44px;height:44px;font-size:1.1rem">4</div>
+            <div>
+              <h3 class="card-title" data-i18n="why_4_title">Native Swift bridge</h3>
+              <p class="card-desc mt-1" data-i18n="why_4_desc">EventKit, PhotoKit, HealthKit, and CoreLocation — real framework access, not just AppleScript.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card reveal" data-delay="200" style="cursor:default">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content flex-row items-start gap-4" style="flex-direction:row">
+            <div class="step-num shrink-0 text-lg" style="width:44px;height:44px;font-size:1.1rem">5</div>
+            <div>
+              <h3 class="card-title" data-i18n="why_5_title">Source preview</h3>
+              <p class="card-desc mt-1" data-i18n="why_5_desc">Build locally and inspect the implementation. A source release does not publish an npm package or signed installer.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section id="install" class="relative z-[1] py-20">
+    <div class="max-w-[900px] mx-auto px-5 text-center">
+      <div>
+        <p class="section-label reveal" data-i18n="install_label">Source preview</p>
+        <h2 class="text-[clamp(2rem,5vw,3rem)] font-bold tracking-tight mt-2 reveal" data-delay="40" data-i18n="install_title">Build from source on macOS.</h2>
+        <p class="mt-3 text-sm opacity-35 reveal" data-delay="80" data-i18n="install_sub">npm, Registry, MCPB downloads and a signed app installer are not yet published. Repository publication is separate from distribution.</p>
+      </div>
+      <div class="grid grid-cols-2 gap-4 max-md:grid-cols-1 mt-10">
+        <div class="glass-card reveal" data-delay="100">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content text-left">
+            <small class="card-badge">Task Dashboard</small>
+            <h3 class="card-title mt-4" data-i18n="install_mcpb_title">Build the native app</h3>
+            <p class="card-desc mt-2" data-i18n="install_mcpb_desc">Use npm run app:run from the checkout. Start the local runtime, then open Task Dashboard from the Taxi menu.</p>
+            <a href="https://github.com/heznpc/Taxi#build-from-source" target="_blank" rel="noopener" class="lg-btn mt-6 inline-flex" data-i18n="install_releases">Read the build guide</a>
+          </div>
+        </div>
+        <div class="glass-card reveal" data-delay="140">
+          <div class="glass-fx"></div><div class="glass-tint"></div><div class="glass-shine"></div>
+          <div class="glass-content text-left">
+            <small class="card-badge">Codex · Claude Code · Cursor · Windsurf</small>
+            <h3 class="card-title mt-4" data-i18n="install_stdio_title">Connect the local MCP runtime</h3>
+            <p class="card-desc mt-2" data-i18n="install_stdio_desc">Run npm ci and npm run build. Configure your client with node and the absolute path to dist/index.js.</p>
+            <pre class="font-mono text-xs leading-7 mt-5 overflow-x-auto"><span class="opacity-40">$ </span><span class="opacity-70">node dist/index.js setup --no-clients</span>
+<span class="opacity-40">$ </span><span class="opacity-70">node dist/index.js run</span></pre>
+          </div>
+        </div>
+      </div>
+      <p class="mt-6 text-xs opacity-30 reveal" data-delay="180" data-i18n="install_app_note">Development app and MCPB builds are available from source. They are not a signed installer or published download; Pages deployment is separate.</p>
+      <p class="mt-3 text-xs opacity-25 reveal" data-delay="200" data-i18n="install_note">Requires macOS and Node.js 22+. Native app builds also need the Xcode command-line toolchain.</p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="relative z-[1] py-6 border-t border-white/[.04]">
+    <div class="max-w-[1080px] mx-auto px-5 flex flex-col items-center gap-3 text-center">
+      <span class="flex items-center gap-2 font-mono text-sm font-medium opacity-60"><img src="taxi-icon-32.png" alt="" width="20" height="20">Taxi</span>
+      <p class="text-xs opacity-20" data-i18n="footer_tagline">Source preview by Heznpc. Coordinate sessions, models and Mac tools.</p>
+      <p class="text-xs opacity-30">Made by <a href="https://heznpc.github.io/heznpc/" class="hover:opacity-80 transition-opacity" style="text-decoration:underline">@heznpc</a></p>
+      <div class="flex gap-5 text-xs opacity-25">
+        <a href="https://github.com/heznpc/Taxi" class="hover:opacity-60 transition-opacity">GitHub</a>
+        <a href="https://github.com/heznpc/Taxi/issues" class="hover:opacity-60 transition-opacity">Issues</a>
+        <a href="https://github.com/heznpc/Taxi/discussions" class="hover:opacity-60 transition-opacity">Discussions</a>
+      </div>
+      <p class="text-[.7rem] opacity-15">MIT License</p>
+    </div>
+  </footer>
+
+  <!-- Modal (expanded) -->
+  <div class="modal-overlay" id="modal">
+    <div class="modal-glass modal-glass--expanded">
+      <div class="glass-fx"></div>
+      <div class="glass-tint"></div>
+      <div class="glass-shine"></div>
+      <div class="glass-content modal-scroll">
+        <button class="absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-lg opacity-60 hover:opacity-100 border border-white/15 transition-opacity z-10" id="modalClose" aria-label="Close">&times;</button>
+        <span class="mod-icon mod-icon--lg" id="modalIcon"></span>
+        <h3 class="text-2xl font-bold tracking-tight mb-3" id="modalTitle"></h3>
+        <p class="text-base opacity-75 leading-relaxed mb-4" id="modalDetail"></p>
+        <code class="block font-mono text-sm opacity-60 mb-5" id="modalTags"></code>
+
+        <!-- Try example -->
+        <div class="modal-example" id="modalExample">
+          <p class="text-xs font-medium opacity-70 uppercase tracking-wider mb-2" data-i18n="modal_try">Try it</p>
+          <div class="modal-prompt" id="modalPrompt"></div>
+        </div>
+
+        <!-- Tool list -->
+        <div class="modal-tools" id="modalTools">
+          <p class="text-xs font-medium opacity-70 uppercase tracking-wider mb-3" data-i18n="modal_tools_label">Tools</p>
+          <div class="modal-tool-grid" id="modalToolGrid"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="icons.js"></script>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

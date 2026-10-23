@@ -1,0 +1,68 @@
+{
+  "schema": "modore.agent-state-snapshot",
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-21T00:00:00+0000",
+  "contract": "session ids, evidence types, and sizes only; transcript content is read for file-access evidence but never retained",
+  "workspace": "/Users/example/projects/flowship",
+  "repoUrl": "github.com/example/flowship",
+  "deep": true,
+  "coverage": "complete",
+  "coverageDetail": {
+    "claude": "complete",
+    "codex": "complete",
+    "gemini": "complete",
+    "editors": "complete",
+    "unboundStores": []
+  },
+  "assessed": true,
+  "storeFingerprint": {
+    "digest": "c2196e4950bbc3aff014a67d825d901342016637393124ae1ea231167b9fa660",
+    "fileCount": 2
+  },
+  "bindings": [
+    {
+      "provider": "claude",
+      "sessionId": "sess-main",
+      "source": "/Users/example/.claude/projects/-slug-flowship/sess-main.jsonl",
+      "subtranscripts": [
+        "/Users/example/.claude/projects/-slug-flowship/sess-main/subagents/agent-0.jsonl"
+      ],
+      "evidence": [
+        "working-directory"
+      ],
+      "confidence": "medium",
+      "sizeBytes": 110
+    },
+    {
+      "provider": "codex",
+      "sessionId": "codex-a",
+      "source": "/Users/example/.codex/sessions/rollout-a.jsonl",
+      "subtranscripts": [],
+      "evidence": [
+        "remote-url",
+        "working-directory"
+      ],
+      "confidence": "high",
+      "sizeBytes": 224
+    }
+  ],
+  "summary": {
+    "total": 2,
+    "byProvider": {
+      "claude": 1,
+      "codex": 1,
+      "gemini": 0,
+      "antigravity": 0,
+      "cursor": 0,
+      "kiro": 0,
+      "vscode": 0,
+      "windsurf": 0
+    },
+    "byConfidence": {
+      "high": 1,
+      "medium": 1,
+      "low": 0
+    },
+    "sizeBytes": 334
+  }
+}

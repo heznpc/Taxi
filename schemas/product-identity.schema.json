@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taxi.invalid/schemas/product-identity.schema.json",
+  "title": "Taxi product identity",
+  "type": "object",
+  "required": ["product", "version", "repository", "npm", "cli", "mcp", "apple", "runtime", "paths", "distribution"],
+  "properties": {
+    "product": { "const": "Taxi" },
+    "version": { "const": "1.0.0" },
+    "repository": { "type": "object" },
+    "npm": { "type": "object" },
+    "cli": { "type": "object" },
+    "mcp": { "type": "object" },
+    "apple": { "type": "object" },
+    "runtime": { "type": "object" },
+    "paths": { "type": "object" },
+    "distribution": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,125 @@
+name: Set Taxi MCP Registry status
+
+# Manual maintenance for an already-published Taxi registry version. The
+# workflow is deliberately unable to mutate another server namespace or every
+# Taxi version at once.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact published Taxi version (for example 1.0.0)"
+        required: true
+        type: string
+      status:
+        description: "New lifecycle status"
+        required: true
+        type: choice
+        options: [active, deprecated, deleted]
+        default: deprecated
+      message:
+        description: "Optional message (not allowed when status=active)"
+        required: false
+        type: string
+
+concurrency:
+  group: mcp-registry-v${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  set-status:
+    runs-on: ubuntu-latest
+    environment: mcp-registry
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate exact Taxi version tag
+        id: release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Version must be canonical MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::Dispatch this workflow from refs/tags/$TAG (got type=$GITHUB_REF_TYPE ref=$GITHUB_REF)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact Taxi version tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Select Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 22
+
+      - name: Verify protected registry environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: >-
+          node scripts/verify-release-environment.mjs
+          --repo="${{ github.repository }}"
+          --tag="$RELEASE_TAG"
+          --environment=mcp-registry
+
+      - name: Verify checked-out Taxi identity
+        env:
+          VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" ]; then
+            echo "::error::Checked-out source does not match $RELEASE_TAG"
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const server = JSON.parse(readFileSync("server.json", "utf8"));
+          if (pkg.name !== "@heznpc/taxi" || pkg.mcpName !== "io.github.heznpc/taxi") {
+            throw new Error("checked-out package is not Taxi");
+          }
+          if (pkg.version !== process.env.VERSION || server.version !== process.env.VERSION) {
+            throw new Error("checked-out Taxi version does not match the requested registry version");
+          }
+          if (server.name !== pkg.mcpName) throw new Error("checked-out registry identity is not Taxi");
+          NODE
+
+      - name: Install checksum-pinned mcp-publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_LINUX_AMD64_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          ARCHIVE=mcp-publisher_linux_amd64.tar.gz
+          /usr/bin/curl --proto '=https' --tlsv1.2 -fsSLo "$ARCHIVE" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/$ARCHIVE"
+          printf '%s  %s\n' "$MCP_PUBLISHER_LINUX_AMD64_SHA256" "$ARCHIVE" | sha256sum --check --strict
+          tar -xzf "$ARCHIVE" mcp-publisher
+          rm -f "$ARCHIVE"
+          test -x ./mcp-publisher
+
+      - name: Authenticate to MCP Registry with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Set exact Taxi version status
+        env:
+          VERSION: ${{ inputs.version }}
+          NEW_STATUS: ${{ inputs.status }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          if [ "$NEW_STATUS" = "active" ] && [ -n "$MESSAGE" ]; then
+            echo "::error::An active status cannot carry a message"
+            exit 1
+          fi
+          args=(--status "$NEW_STATUS")
+          if [ -n "$MESSAGE" ]; then args+=(--message "$MESSAGE"); fi
+          ./mcp-publisher status "${args[@]}" io.github.heznpc/taxi "$VERSION"

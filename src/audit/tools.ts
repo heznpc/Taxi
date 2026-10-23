@@ -1,0 +1,195 @@
+import type { McpServer } from "../shared/mcp.js";
+import { z } from "zod";
+import type { TaxiConfig } from "../shared/config.js";
+import { okStructured, toolError } from "../shared/result.js";
+import { readAuditEntries, summarizeAuditEntries } from "../shared/audit.js";
+
+const auditBreakSchema = z.object({
+  file: z.string(),
+  lineIndex: z.number(),
+  reason: z.enum(["hmac_mismatch", "prev_mismatch", "malformed", "truncated", "checkpoint_forged"]),
+});
+
+const auditHistoryEntrySchema = z.object({
+  invocationId: z.string().optional(),
+  requestDigest: z.string().optional(),
+  timestamp: z.string(),
+  kind: z.enum(["tool", "approval"]),
+  tool: z.string(),
+  status: z.enum(["ok", "error"]),
+  durationMs: z.number().optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
+  correlationId: z.string().optional(),
+  actor: z.string().optional(),
+  errorCategory: z.string().optional(),
+  approvalId: z.string().uuid().optional(),
+  approvalDecision: z.enum(["approved", "denied", "timed_out", "unavailable"]).optional(),
+  approvalRequestDigest: z.string().optional(),
+  approvalChannel: z.enum(["elicitation", "socket", "unavailable"]).optional(),
+  gate: z.enum(["oauth_scope", "emergency_stop", "rate_limit"]).optional(),
+});
+
+/**
+ * Audit log consumption tools.
+ *
+ * The audit log is already populated by every tool-registry call with
+ * PII-scrubbed args and 0600 file permissions. What's been missing is
+ * a way for the user (or an agent acting on their behalf) to actually
+ * ask "what has Taxi done on my machine?". These two tools close
+ * that loop:
+ *
+ *   audit_log      — paginated list of recent calls, filterable by
+ *                    tool name / status / time window
+ *   audit_summary  — aggregate stats: call count, error rate, top tools
+ *
+ * Both are read-only over the on-disk JSONL files (current + rotated).
+ * The args are intentionally small so Claude can chain these into a
+ * skill (e.g. "what did I do yesterday?") without argument bloat.
+ */
+export function registerAuditTools(server: McpServer, _config: TaxiConfig): void {
+  server.registerTool(
+    "audit_log",
+    {
+      title: "Audit Log",
+      description:
+        "Query the on-device audit log of tool calls. Reads JSONL rows from ~/.taxi/audit.jsonl (+ rotated siblings) " +
+        "and returns recent entries newest-first with optional filters by tool / status / time window. " +
+        "Args are already PII-scrubbed at write-time; sensitive-tool entries have `_redacted` args.",
+      inputSchema: {
+        since: z
+          .string()
+          .datetime()
+          .optional()
+          .describe("Lower-bound ISO 8601 timestamp. Entries older than this are dropped. Defaults to 7 days ago."),
+        until: z.string().datetime({ offset: true }).optional().describe("Exclusive upper timestamp bound."),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Offset within observed history; concurrent writes may shift pages."),
+        tool: z.string().max(120).optional().describe("Filter to a single tool name (exact match)."),
+        actor: z
+          .string()
+          .max(120)
+          .optional()
+          .describe(
+            "Filter by provenance: 'direct' = human/client-driven calls, 'daemon-skill:<name>' = autonomous " +
+              "event-triggered skills, 'hitl-approved' = queued-then-approved. Omit to include all.",
+          ),
+        status: z.enum(["ok", "error"]).optional().describe("Filter by status. Omit to include both."),
+        correlationId: z.string().max(200).optional().describe("Filter to one correlated tool/approval trace."),
+        kind: z.enum(["tool", "approval"]).optional().describe("Filter tool calls or approval decisions."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .optional()
+          .default(100)
+          .describe("Max entries to return (default: 100, max: 1000)."),
+      },
+      outputSchema: {
+        total: z.number(),
+        returned: z.number(),
+        scannedFiles: z.number(),
+        entries: z.array(auditHistoryEntrySchema),
+        verified: z.boolean(),
+        firstBreak: auditBreakSchema.optional(),
+        auditDisabled: z.boolean(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ since, until, offset, tool, actor, status, correlationId, kind, limit }) => {
+      try {
+        const result = await readAuditEntries({
+          since,
+          until,
+          offset,
+          tool,
+          actor,
+          status,
+          correlationId,
+          kind,
+          limit,
+        });
+        return okStructured(result);
+      } catch (e) {
+        return toolError("read audit log", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "audit_summary",
+    {
+      title: "Audit Summary",
+      description:
+        "Aggregate the audit log over a time window — total call count, error rate, the busiest tools, and a " +
+        "provenance breakdown (`byActor`) of what ran human-driven (`direct`) vs. autonomously " +
+        "(`daemon-skill:<name>`). Useful for weekly reviews and for spotting runaway agents (a sudden " +
+        "top-of-leaderboard `create_*` tool, or daemon activity you didn't authorize, is a red flag).",
+      inputSchema: {
+        since: z.string().datetime().optional().describe("Lower-bound ISO 8601 timestamp. Defaults to 7 days ago."),
+        topN: z.number().int().min(1).max(50).optional().default(10).describe("Top-N busiest tools (default: 10)."),
+      },
+      outputSchema: {
+        since: z.string(),
+        total: z.number(),
+        errors: z.number(),
+        errorRate: z.number(),
+        scannedFiles: z.number(),
+        topTools: z.array(
+          z.object({
+            tool: z.string(),
+            count: z.number(),
+            errors: z.number(),
+          }),
+        ),
+        // Provenance breakdown — what ran autonomously vs. human-driven.
+        // `direct` = human/client call; `daemon-skill:<name>` = an event-
+        // triggered skill that fired without a person present. This is the
+        // single highest-value governance query the audit log can answer.
+        byActor: z.array(
+          z.object({
+            actor: z.string(),
+            count: z.number(),
+            errors: z.number(),
+          }),
+        ),
+        // Tamper-evidence — the strongest trust signal in the codebase. The
+        // HMAC chain is replayed on every summary; surfacing the verdict (and
+        // the first break location) in the tool contract lets a consumer act
+        // on `verified === false` instead of trusting the log blindly.
+        verified: z.boolean(),
+        verifiedFirstBreak: auditBreakSchema.optional(),
+        // Audit logging currently halted (disk full / permission / repeated
+        // flush failures). Surfaced so a doctor / health check can flag a gap
+        // in coverage rather than reading silence as "nothing happened".
+        auditDisabled: z.boolean(),
+        // Coverage disclosure — a broken chain must never silently shrink the
+        // summary. unverifiedTailRows = rows after a chain break that exist on
+        // disk but are not in `total`; unsignedLegacyRows = pre-HMAC rows
+        // still active; quarantined = audit.legacy-untrusted.* snapshot files
+        // (full pre-surgery file images, so rows may overlap the active
+        // chain's surviving prefix).
+        unverifiedTailRows: z.number(),
+        unsignedLegacyRows: z.number(),
+        quarantined: z.object({ files: z.number(), rows: z.number() }),
+        // True when the break is provably key-holder mixed-version history
+        // (old build / concurrent fork) rather than tampering; an upgraded
+        // server quarantines it automatically on its next flush.
+        legacyMixedBreak: z.boolean(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ since, topN }) => {
+      try {
+        const result = await summarizeAuditEntries({ since, topN });
+        return okStructured(result);
+      } catch (e) {
+        return toolError("summarize audit log", e);
+      }
+    },
+  );
+}

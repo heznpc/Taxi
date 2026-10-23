@@ -1,0 +1,80 @@
+# Taxi
+
+> A local workspace for coordinating AI sessions and tools.
+
+> Task Dashboard, explicit child-session handoffs, phase model preferences and governed MCP access to Mac apps share one work environment. Taxi-owned execution currently uses read-only Codex turns; imported external sessions are observation-only.
+
+> Source preview on macOS: build from source with Node.js 22 or newer. npm, Registry, MCPB downloads and a signed app installer are not yet published. General autonomous execution, external-session resume and compression relay are planned, not available. iOS/iPadOS is experimental source; visionOS and watchOS are roadmap targets.
+
+> Explicit permissions, per-call approval, rate limits and audit evidence govern execution. Public examples are synthetic or redacted; prompts, credentials and session catalogs remain private. Authorized provider requests still send selected context to that provider.
+
+## Links
+
+- [Source Code](https://github.com/heznpc/Taxi)
+- [Build from Source](https://github.com/heznpc/Taxi#build-from-source)
+- [Task Dashboard](https://github.com/heznpc/Taxi/blob/main/docs/harness.md)
+- [Full Tool Reference](https://github.com/heznpc/Taxi/blob/main/llms-full.txt)
+- [Contributing Guide](https://github.com/heznpc/Taxi/blob/main/CONTRIBUTING.md)
+- [Security Policy](https://github.com/heznpc/Taxi/blob/main/SECURITY.md)
+
+## Start Here
+
+A reader that meets the module catalogue first concludes the job is to call a
+tool. These are the tasks the tools exist to serve; reach for the catalogue after
+picking one. Curated workflows come from `src/shared/workflows-catalog.json`.
+
+- **Today Overview** (`today-overview`) — See today's calendar and overdue reminders without changing anything.
+  Ask: "Tell me today's calendar events and overdue reminders. Do not change anything."
+- **Daily Briefing** (`daily-briefing`) — Start the day with calendar, reminders, mail, and recent notes.
+  Ask: "Brief me on today's calendar, overdue reminders, unread mail, and recent notes."
+- **Inbox Triage** (`inbox-triage`) — Turn mail backlog into a small, reviewable set of follow-up tasks.
+  Ask: "Find emails from Alex about the project and create reminders for action items."
+- **Meeting Prep** (`meeting-prep`) — Collect the context you need before the next meeting.
+  Ask: "For my next meeting, find related notes, contacts, files, and reminders."
+- **Project Digest** (`project-digest`) — Summarize active project context across indexed Apple workspace data.
+  Ask: "Summarize what changed since yesterday on my current project."
+- **Focus Blocks** (`focus-blocks`) — Turn open reminders into calendar time blocks.
+  Ask: "Plan focus blocks for today's open reminders, but ask before creating each event."
+- **Research to Output** (`research-output`) — Move from Safari, files, and notes into a draft note or email.
+  Ask: "Open the Apple developer docs in Safari, summarize the page, and draft a note."
+- **Development Window Check** (`development-window-check`) — Compare a selected development app or Simulator window with an expected screen state.
+  Ask: "Check the expected screen state of my development app. Ask for the app/window and expected state if missing. Run setup_permissions with system_only true; if Screen Recording is denied or unknown, explain the reported recovery steps and stop. List windows with captureTargets true. If multiple windows match, ask me to select one. Pass all three fields of its target (windowId, ownerPid, title) to capture_window. On a stale target, list again and confirm the selection. Compare the returned image with the expected state and report observed evidence, uncertainties, target, timestamp, and hash. Capturing an image alone does not verify the result."
+Tools are exposed behind a small front door by default: `discover_tools` and
+`start_tool_session` widen access for the task at hand. A successful call means
+a step ran, not that the task is complete.
+
+## Modules
+
+- **audit** (2 tools): audit_log, audit_summary
+- **Bluetooth** (4 tools): get_bluetooth_state, scan_bluetooth, connect_bluetooth, disconnect_bluetooth
+- **Calendar** (10 tools): list_calendars, list_events, read_event, create_event, update_event, delete_event, search_events, get_upcoming_events, today_events, create_recurring_event
+- **Contacts** (10 tools): list_contacts, search_contacts, read_contact, create_contact, update_contact, delete_contact, list_groups, add_contact_email, add_contact_phone, list_group_members
+- **Cross-Module** (0 tools)
+- **Finder** (8 tools): search_files, get_file_info, set_file_tags, recent_files, list_directory, move_file, trash_file, create_directory
+- **Google Workspace** (16 tools): gws_status, gws_gmail_list, gws_gmail_read, gws_gmail_send, gws_drive_list, gws_drive_read, gws_drive_search, gws_sheets_read, gws_sheets_write, gws_calendar_list, gws_calendar_create, gws_docs_read, gws_tasks_list, gws_tasks_create, gws_people_search, gws_raw
+- **harness** (1 tools): read_task_dashboard
+- **health** (5 tools): health_summary, health_today_steps, health_heart_rate, health_sleep, health_authorize
+- **Apple Intelligence** (13 tools): summarize_text, rewrite_text, proofread_text, generate_text, generate_structured, tag_content, ai_chat, generate_image, scan_document, generate_plan, ai_plan_metrics, ai_status, ai_agent
+- **Keynote** (9 tools): keynote_list_documents, keynote_create_document, keynote_list_slides, keynote_get_slide, keynote_add_slide, keynote_set_presenter_notes, keynote_export_pdf, keynote_start_slideshow, keynote_close_document
+- **Location** (2 tools): get_current_location, get_location_permission
+- **Mail** (11 tools): list_mailboxes, list_messages, read_message, search_messages, mark_message_read, flag_message, get_unread_count, move_message, list_accounts, send_mail, reply_mail
+- **Maps** (8 tools): search_location, get_directions, drop_pin, open_address, search_nearby, share_location, geocode, reverse_geocode
+- **memory** (4 tools): memory_put, memory_query, memory_forget, memory_stats
+- **Messages** (6 tools): list_chats, read_chat, search_chats, send_message, send_file, list_participants
+- **Music** (17 tools): list_playlists, list_tracks, now_playing, playback_control, search_tracks, play_track, play_playlist, get_track_info, set_shuffle, create_playlist, add_to_playlist, remove_from_playlist, delete_playlist, get_rating, set_rating, set_favorited, set_disliked
+- **Notes** (12 tools): list_notes, search_notes, read_note, create_note, update_note, delete_note, list_folders, create_folder, move_note, scan_notes, compare_notes, bulk_move_notes
+- **Numbers** (12 tools): numbers_list_documents, numbers_create_document, numbers_list_sheets, numbers_get_cell, numbers_set_cell, numbers_read_cells, numbers_add_sheet, numbers_export_pdf, numbers_close_document, numbers_list_tables, numbers_get_formula, numbers_rename_sheet
+- **Pages** (7 tools): pages_list_documents, pages_open_document, pages_create_document, pages_get_body_text, pages_set_body_text, pages_export_pdf, pages_close_document
+- **Photos** (11 tools): list_albums, list_photos, search_photos, get_photo_info, list_favorites, create_album, add_to_album, import_photo, delete_photos, query_photos, classify_image
+- **Podcasts** (6 tools): list_podcast_shows, list_podcast_episodes, podcast_now_playing, podcast_playback_control, play_podcast_episode, search_podcast_episodes
+- **Reminders** (11 tools): list_reminder_lists, list_reminders, read_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder, search_reminders, create_reminder_list, delete_reminder_list, create_recurring_reminder
+- **Safari** (12 tools): list_tabs, read_page_content, get_current_tab, open_url, close_tab, activate_tab, run_javascript, search_tabs, list_bookmarks, add_bookmark, list_reading_list, add_to_reading_list
+- **Screen Capture** (5 tools): capture_screen, capture_window, capture_area, list_windows, record_screen
+- **Semantic Search** (7 tools): semantic_index, semantic_search, find_related, spotlight_sync, semantic_clear, spotlight_clear, semantic_status
+- **Setup** (1 tools): setup_permissions
+- **Shortcuts** (10 tools): list_shortcuts, run_shortcut, search_shortcuts, get_shortcut_detail, create_shortcut, delete_shortcut, export_shortcut, import_shortcut, duplicate_shortcut, edit_shortcut
+- **speech** (3 tools): transcribe_audio, speech_availability, smart_clipboard
+- **System** (28 tools): get_clipboard, set_clipboard, get_volume, set_volume, toggle_dark_mode, get_frontmost_app, list_running_apps, get_screen_info, show_notification, capture_screenshot, get_wifi_status, toggle_wifi, list_bluetooth_devices, get_battery_status, get_brightness, set_brightness, toggle_focus_mode, system_sleep, prevent_sleep, allow_sleep, system_power, launch_app, quit_app, is_app_running, list_all_windows, move_window, resize_window, minimize_window
+- **TV** (6 tools): tv_list_playlists, tv_list_tracks, tv_now_playing, tv_playback_control, tv_search, tv_play
+- **UI Automation** (10 tools): ui_open_app, ui_click, ui_type, ui_press_key, ui_scroll, ui_read, ui_accessibility_query, ui_perform_action, ui_traverse, ui_diff
+- **Weather** (3 tools): get_current_weather, get_daily_forecast, get_hourly_forecast

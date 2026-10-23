@@ -1,0 +1,366 @@
+import type { McpServer } from "../shared/mcp.js";
+import { z } from "zod";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { runJxa } from "../shared/jxa.js";
+import type { TaxiConfig } from "../shared/config.js";
+import { ok, okLinked, okLinkedStructured, okStructured, errJxaFor } from "../shared/result.js";
+import { TIMEOUT } from "../shared/constants.js";
+import { log, errToCtx } from "../shared/logger.js";
+import { zFilePath, resolveAndGuard } from "../shared/validate.js";
+import {
+  listShortcutsScript,
+  runShortcutScript,
+  searchShortcutsScript,
+  getShortcutDetailScript,
+  deleteShortcutScript,
+  exportShortcutScript,
+  importShortcutScript,
+  createShortcutScript,
+  duplicateShortcutScript,
+  editShortcutScript,
+  type ShortcutsNameList,
+  type ShortcutsDetail,
+} from "./scripts.js";
+
+const execFileAsync = promisify(execFile);
+import { LIMITS } from "../shared/constants.js";
+
+/**
+ * Sanitize a shortcut name into a valid MCP tool name.
+ * MCP tool names must be alphanumeric + underscores, no spaces.
+ * Returns empty string if the name sanitizes to nothing meaningful.
+ */
+export function sanitizeToolName(name: string): string {
+  const sanitized = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "");
+  if (!sanitized) return "";
+  return `shortcut_${sanitized}`;
+}
+
+export function registerShortcutsTools(server: McpServer, _config: TaxiConfig): void {
+  server.registerTool(
+    "list_shortcuts",
+    {
+      title: "List Shortcuts",
+      description: "List all available Siri Shortcuts on this Mac.",
+      inputSchema: {},
+      outputSchema: {
+        total: z.number(),
+        shortcuts: z.array(z.string()),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => {
+      try {
+        return okLinkedStructured("list_shortcuts", await runJxa<ShortcutsNameList>(listShortcutsScript()));
+      } catch (e) {
+        return errJxaFor("list shortcuts", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "run_shortcut",
+    {
+      title: "Run Shortcut",
+      description:
+        "Run a Siri Shortcut by name. Optionally provide text input. Returns the shortcut's output. Note: shortcuts may trigger UI prompts or perform system actions.",
+      inputSchema: {
+        name: z.string().max(500).describe("Shortcut name (exact match)"),
+        input: z.string().max(10000).optional().describe("Optional text input for the shortcut"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ name, input }) => {
+      try {
+        return okLinked("run_shortcut", await runJxa(runShortcutScript(name, input)));
+      } catch (e) {
+        return errJxaFor("run shortcut", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "search_shortcuts",
+    {
+      title: "Search Shortcuts",
+      description: "Search Siri Shortcuts by name keyword.",
+      inputSchema: {
+        query: z.string().max(500).describe("Search keyword to match against shortcut names"),
+      },
+      outputSchema: {
+        total: z.number(),
+        shortcuts: z.array(z.string()),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ query }) => {
+      try {
+        return okStructured(await runJxa<ShortcutsNameList>(searchShortcutsScript(query)));
+      } catch (e) {
+        return errJxaFor("search shortcuts", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_shortcut_detail",
+    {
+      title: "Get Shortcut Detail",
+      description: "Get details about a Siri Shortcut including its actions.",
+      inputSchema: {
+        name: z.string().max(500).describe("Shortcut name (exact match)"),
+      },
+      outputSchema: {
+        shortcut: z.string(),
+        detail: z.string(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ name }) => {
+      try {
+        return okStructured(await runJxa<ShortcutsDetail>(getShortcutDetailScript(name)));
+      } catch (e) {
+        return errJxaFor("get shortcut detail", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_shortcut",
+    {
+      title: "Create Shortcut",
+      description:
+        "Create a new empty Siri Shortcut by name — drives the Shortcuts app via UI automation (needs Accessibility permission; the app opens and takes focus). The shortcut must be further configured in the Shortcuts app.",
+      inputSchema: {
+        name: z.string().max(500).describe("Name for the new shortcut"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ name }) => {
+      try {
+        return ok(await runJxa(createShortcutScript(name)));
+      } catch (e) {
+        return errJxaFor("create shortcut", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "delete_shortcut",
+    {
+      title: "Delete Shortcut",
+      description:
+        "Delete a Siri Shortcut by name. Uses the macOS shortcuts CLI (macOS 13+). This action is permanent and cannot be undone.",
+      inputSchema: {
+        name: z.string().max(500).describe("Shortcut name to delete (exact match)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ name }) => {
+      try {
+        return ok(await runJxa(deleteShortcutScript(name)));
+      } catch (e) {
+        return errJxaFor("delete shortcut", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "export_shortcut",
+    {
+      title: "Export Shortcut",
+      description:
+        "Export a Siri Shortcut to a .shortcut file. Uses the macOS shortcuts CLI to save the shortcut to the specified output path.",
+      inputSchema: {
+        name: z.string().max(500).describe("Shortcut name to export (exact match)"),
+        outputPath: zFilePath.describe(
+          "File path to export the .shortcut file to (e.g. ~/Desktop/MyShortcut.shortcut)",
+        ),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ name, outputPath }) => {
+      try {
+        // Symlink hardening: shortcuts CLI will follow a symlinked outputPath
+        // and clobber whatever it points to. Require resolution stays inside
+        // HOME so a malicious symlink can't redirect the export into
+        // /etc/launchd.plist.d/ or similar privileged locations.
+        resolveAndGuard(outputPath);
+        return ok(await runJxa(exportShortcutScript(name, outputPath)));
+      } catch (e) {
+        return errJxaFor("export shortcut", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "import_shortcut",
+    {
+      title: "Import Shortcut",
+      description:
+        "Import a .shortcut file into Siri Shortcuts. Uses the macOS shortcuts CLI to import the shortcut from the specified file path.",
+      inputSchema: {
+        filePath: zFilePath.describe("Path to the .shortcut file to import"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ filePath }) => {
+      try {
+        // Symlink hardening: import reads the .shortcut bundle off disk,
+        // so a symlink pointing at a system file could be coerced into a
+        // shortcut by a malicious skill. Constrain to HOME like the other
+        // file-touching shortcut tools.
+        resolveAndGuard(filePath);
+        return ok(await runJxa(importShortcutScript(filePath)));
+      } catch (e) {
+        return errJxaFor("import shortcut", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "duplicate_shortcut",
+    {
+      title: "Duplicate Shortcut",
+      description:
+        "Duplicate an existing Siri Shortcut. Exports the shortcut to a temporary file and re-imports it with a new name.",
+      inputSchema: {
+        name: z.string().max(500).describe("Name of the shortcut to duplicate (exact match)"),
+        newName: z.string().max(500).describe("Name for the duplicated shortcut"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ name, newName }) => {
+      try {
+        return ok(await runJxa(duplicateShortcutScript(name, newName)));
+      } catch (e) {
+        return errJxaFor("duplicate shortcut", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "edit_shortcut",
+    {
+      title: "Edit Shortcut",
+      description:
+        "Open a Siri Shortcut in the Shortcuts app for manual editing. Uses UI automation (System Events) to activate the app, search for the shortcut, and open it. The user can then edit the shortcut in the Shortcuts app UI.",
+      inputSchema: {
+        name: z.string().max(500).describe("Shortcut name to edit (exact match)"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ name }) => {
+      try {
+        return ok(await runJxa(editShortcutScript(name)));
+      } catch (e) {
+        return errJxaFor("open shortcut for editing", e);
+      }
+    },
+  );
+}
+
+/**
+ * Discover user's Siri Shortcuts at startup and register each as an individual MCP tool.
+ * Returns the number of dynamic tools registered. Gracefully returns 0 on failure.
+ */
+let cachedShortcutNames: string[] | null = null;
+
+async function discoverShortcuts(): Promise<string[]> {
+  if (cachedShortcutNames) return cachedShortcutNames;
+  try {
+    const result = await execFileAsync("shortcuts", ["list"], { timeout: TIMEOUT.SHORTCUTS_LIST });
+    const names = result.stdout.split("\n").filter((n) => n.trim().length > 0);
+    if (names.length > LIMITS.DYNAMIC_SHORTCUTS) {
+      log.info("dynamic shortcuts: limit reached", {
+        found: names.length,
+        registering: LIMITS.DYNAMIC_SHORTCUTS,
+      });
+    }
+    cachedShortcutNames = names.slice(0, LIMITS.DYNAMIC_SHORTCUTS);
+  } catch (e) {
+    log.warn("dynamic shortcuts: failed to list", { err: errToCtx(e) });
+    cachedShortcutNames = [];
+  }
+  return cachedShortcutNames;
+}
+
+export async function registerDynamicShortcutTools(server: McpServer): Promise<number> {
+  const toRegister = await discoverShortcuts();
+  if (toRegister.length === 0) return 0;
+  const seen = new Set<string>();
+  let count = 0;
+
+  for (const name of toRegister) {
+    const toolName = sanitizeToolName(name);
+    if (!toolName) {
+      log.warn("skipping shortcut with unsanitizable name", { name });
+      continue;
+    }
+    if (seen.has(toolName)) {
+      log.warn("skipping duplicate shortcut tool name", { toolName, source: name });
+      continue;
+    }
+    seen.add(toolName);
+
+    server.registerTool(
+      toolName,
+      {
+        title: `Run: ${name}`,
+        description: `Run the "${name}" Siri Shortcut. Optionally provide text input.`,
+        inputSchema: {
+          input: z.string().max(10000).optional().describe("Optional text input for the shortcut"),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ input }) => {
+        try {
+          return ok(await runJxa(runShortcutScript(name, input)));
+        } catch (e) {
+          return errJxaFor(`run shortcut "${name}"`, e);
+        }
+      },
+    );
+
+    // The logger writes to stderr; MCP stdio transport reserves stdout for
+    // protocol traffic. Informational signal, not an error.
+    log.info("dynamic shortcut registered", { name });
+    count++;
+  }
+
+  return count;
+}

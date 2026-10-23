@@ -1,0 +1,56 @@
+name: sender-to-tasks
+title: "Sender → Tasks"
+description: >-
+  Scan Mail for a keyword or sender and create one reminder per matching
+  message — writes reminders (each creation HITL-gated); mail is only read.
+  Accepts runtime inputs so the same skill handles newsletter triage, a
+  specific sender, or any ad-hoc query without editing YAML. Loop +
+  `on_error: continue` means the rest of the batch still gets queued even
+  if one reminder-create fails (HITL denial, Reminders permission, etc.).
+expose_as: tool
+annotations:
+  readOnlyHint: false
+  destructiveHint: false
+  idempotentHint: false
+  openWorldHint: false
+inputs:
+  query:
+    type: string
+    description: "Search keyword in subject/sender (e.g. 'newsletter', 'invoice', 'team@acme.com')."
+    default: "newsletter"
+  mailbox:
+    type: string
+    description: "Mailbox to search."
+    default: "INBOX"
+  limit:
+    type: number
+    description: "Max messages to process per run."
+    default: 10
+
+steps:
+  # 1) Find the matching messages. `search_messages` is untrusted (the
+  #    body is user content) — we only use the subject/sender fields
+  #    below, which are safer to template into a reminder title.
+  #    Mail.app occasionally returns an empty result right after launch
+  #    while it's still indexing; `retry: 2` smooths that over.
+  - id: hits
+    tool: search_messages
+    args:
+      query: "{{query}}"
+      mailbox: "{{mailbox}}"
+      limit: "{{limit}}"
+    retry: 2
+    retry_backoff_ms: 1000
+
+  # 2) For each hit, drop a reminder. Individual failures (HITL denial,
+  #    malformed date, etc.) are logged into the loop result via
+  #    `on_error: continue` — the skill finishes and reports how many
+  #    succeeded vs. failed in the step result.
+  - id: queue
+    tool: create_reminder
+    only_if: "{{hits}} != null"
+    loop: "{{hits}}"
+    on_error: continue
+    args:
+      title: "Follow up: {{_item.subject}}"
+      body: "From {{_item.sender}} on {{_item.dateReceived}} (matched query: {{query}})"

@@ -1,0 +1,346 @@
+// TaxiKit — Foundation Models ↔ Taxi bidirectional bridge.
+// Exposes Taxi tools (Calendar, Reminders, Contacts) as Foundation Models
+// Tool protocol conformances so Apple's on-device LLM can call them autonomously.
+
+import Foundation
+
+// FoundationModels host mode is preview and remains opt-in at compile time.
+// Build with:
+//   npm run swift-build:fm
+#if TAXI_ENABLE_FOUNDATION_MODELS && canImport(FoundationModels) && compiler(>=6.2)
+import FoundationModels
+
+// MARK: - Taxi Tools for Foundation Models
+
+@available(macOS 26, iOS 26, *)
+public enum FoundationModelsBridgeError: LocalizedError, Sendable {
+    case toolBudgetExceeded(maxCalls: Int)
+    case toolOutputTooLarge(tool: String, maxCharacters: Int)
+    case writeToolUnavailable(tool: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .toolBudgetExceeded(let maxCalls):
+            return "Foundation Models tool-call budget exceeded (\(maxCalls) calls)."
+        case .toolOutputTooLarge(let tool, let maxCharacters):
+            return "Foundation Models tool output too large for \(tool) (max \(maxCharacters) characters)."
+        case .writeToolUnavailable(let tool):
+            return "Foundation Models write tool \(tool) is disabled until Taxi can route it through HITL, rate-limit, and audit."
+        }
+    }
+}
+
+@available(macOS 26, iOS 26, *)
+public struct FoundationModelsBridgeLimits: Sendable {
+    public let maxToolCalls: Int
+    public let maxToolOutputCharacters: Int
+    public let maxResponseTokens: Int
+
+    public init(
+        maxToolCalls: Int = 6,
+        maxToolOutputCharacters: Int = 24_000,
+        maxResponseTokens: Int = 1_200
+    ) {
+        self.maxToolCalls = max(1, maxToolCalls)
+        self.maxToolOutputCharacters = max(1_000, maxToolOutputCharacters)
+        self.maxResponseTokens = max(128, maxResponseTokens)
+    }
+}
+
+@available(macOS 26, iOS 26, *)
+public actor FoundationModelsToolBudget {
+    private let limits: FoundationModelsBridgeLimits
+    private var calls = 0
+
+    public init(limits: FoundationModelsBridgeLimits) {
+        self.limits = limits
+    }
+
+    public func check(tool: String, output: String) throws -> String {
+        calls += 1
+        guard calls <= limits.maxToolCalls else {
+            throw FoundationModelsBridgeError.toolBudgetExceeded(maxCalls: limits.maxToolCalls)
+        }
+        guard output.count <= limits.maxToolOutputCharacters else {
+            throw FoundationModelsBridgeError.toolOutputTooLarge(
+                tool: tool,
+                maxCharacters: limits.maxToolOutputCharacters
+            )
+        }
+        return output
+    }
+}
+
+@available(macOS 26, iOS 26, *)
+public struct FoundationModelsNoArguments: Generable {
+    public static var generationSchema: GenerationSchema {
+        GenerationSchema(type: Self.self, description: "No arguments.", properties: [])
+    }
+
+    public init() {}
+
+    public init(_ content: GeneratedContent) throws {
+        self.init()
+    }
+
+    public var generatedContent: GeneratedContent {
+        GeneratedContent(properties: [:])
+    }
+}
+
+/// Calendar tool: Get today's events via Foundation Models tool calling.
+@available(macOS 26, iOS 26, *)
+public final class TodayEventsTool: Tool {
+    public let name = "today_events"
+    public let description = "Get today's calendar events with titles, times, and locations."
+    private let budget: FoundationModelsToolBudget
+
+    public typealias Arguments = FoundationModelsNoArguments
+
+    public init(budget: FoundationModelsToolBudget) {
+        self.budget = budget
+    }
+
+    public func call(arguments: Arguments) async throws -> String {
+        let service = EventKitService()
+        let result = try await service.todayEvents()
+        let data = try JSONEncoder().encode(result)
+        return try await budget.check(tool: name, output: String(data: data, encoding: .utf8) ?? "[]")
+    }
+}
+
+/// Reminders tool: Get due reminders.
+@available(macOS 26, iOS 26, *)
+public final class DueRemindersTool: Tool {
+    public let name = "due_reminders"
+    public let description = "Get reminders that are due today or overdue."
+    private let budget: FoundationModelsToolBudget
+
+    public typealias Arguments = FoundationModelsNoArguments
+
+    public init(budget: FoundationModelsToolBudget) {
+        self.budget = budget
+    }
+
+    public func call(arguments: Arguments) async throws -> String {
+        let service = EventKitService()
+        let input = ListRemindersInput(list: nil, completed: false, limit: 20, offset: 0)
+        let result = try await service.listReminders(input)
+        let data = try JSONEncoder().encode(result)
+        return try await budget.check(tool: name, output: String(data: data, encoding: .utf8) ?? "[]")
+    }
+}
+
+/// Contacts search tool.
+@available(macOS 26, iOS 26, *)
+public final class SearchContactsTool: Tool {
+    public let name = "search_contacts"
+    public let description = "Search contacts by name, email, or phone number."
+    private let budget: FoundationModelsToolBudget
+
+    public struct Arguments: Generable {
+        public static var generationSchema: GenerationSchema {
+            GenerationSchema(
+                type: Self.self,
+                description: "Search contacts.",
+                properties: [
+                    GenerationSchema.Property(
+                        name: "query",
+                        description: "Search query: name, email, or phone number.",
+                        type: String.self
+                    ),
+                ]
+            )
+        }
+
+        public var query: String
+
+        public init(query: String) {
+            self.query = query
+        }
+
+        public init(_ content: GeneratedContent) throws {
+            self.query = try content.value(String.self, forProperty: "query")
+        }
+
+        public var generatedContent: GeneratedContent {
+            GeneratedContent(properties: ["query": query])
+        }
+    }
+
+    public init(budget: FoundationModelsToolBudget) {
+        self.budget = budget
+    }
+
+    public func call(arguments: Arguments) async throws -> String {
+        let service = ContactsService()
+        let input = SearchContactsInput(query: arguments.query, limit: nil)
+        let results = try await service.searchContacts(input)
+        let data = try JSONEncoder().encode(results)
+        return try await budget.check(tool: name, output: String(data: data, encoding: .utf8) ?? "[]")
+    }
+}
+
+/// Disabled write stub for reminder creation.
+@available(macOS 26, iOS 26, *)
+public final class CreateReminderTool: Tool {
+    public let name = "create_reminder"
+    public let description = "Reminder creation is disabled in Foundation Models until the call can route through Taxi governance."
+
+    public struct Arguments: Generable {
+        public static var generationSchema: GenerationSchema {
+            GenerationSchema(
+                type: Self.self,
+                description: "Create a reminder.",
+                properties: [
+                    GenerationSchema.Property(
+                        name: "title",
+                        description: "Reminder title.",
+                        type: String.self
+                    ),
+                    GenerationSchema.Property(
+                        name: "dueDate",
+                        description: "Optional due date in ISO 8601 format.",
+                        type: String?.self
+                    ),
+                ]
+            )
+        }
+
+        public var title: String
+        public var dueDate: String?
+
+        public init(title: String, dueDate: String? = nil) {
+            self.title = title
+            self.dueDate = dueDate
+        }
+
+        public init(_ content: GeneratedContent) throws {
+            self.title = try content.value(String.self, forProperty: "title")
+            self.dueDate = try content.value(String?.self, forProperty: "dueDate")
+        }
+
+        public var generatedContent: GeneratedContent {
+            GeneratedContent(properties: ["title": title, "dueDate": dueDate])
+        }
+    }
+
+    public init() {}
+
+    public func call(arguments: Arguments) async throws -> String {
+        throw FoundationModelsBridgeError.writeToolUnavailable(tool: name)
+    }
+}
+
+/// Disabled write stub for note creation.
+@available(macOS 26, iOS 26, *)
+public final class CreateNoteTool: Tool {
+    public let name = "create_note"
+    public let description = "Note creation is disabled in Foundation Models until the call can route through Taxi governance."
+
+    public struct Arguments: Generable {
+        public static var generationSchema: GenerationSchema {
+            GenerationSchema(
+                type: Self.self,
+                description: "Create a note request.",
+                properties: [
+                    GenerationSchema.Property(
+                        name: "body",
+                        description: "Note body content.",
+                        type: String.self
+                    ),
+                    GenerationSchema.Property(
+                        name: "folder",
+                        description: "Optional folder name.",
+                        type: String?.self
+                    ),
+                ]
+            )
+        }
+
+        public var body: String
+        public var folder: String?
+
+        public init(body: String, folder: String? = nil) {
+            self.body = body
+            self.folder = folder
+        }
+
+        public init(_ content: GeneratedContent) throws {
+            self.body = try content.value(String.self, forProperty: "body")
+            self.folder = try content.value(String?.self, forProperty: "folder")
+        }
+
+        public var generatedContent: GeneratedContent {
+            GeneratedContent(properties: ["body": body, "folder": folder])
+        }
+    }
+
+    public init() {}
+
+    public func call(arguments: Arguments) async throws -> String {
+        throw FoundationModelsBridgeError.writeToolUnavailable(tool: name)
+    }
+}
+
+// MARK: - Bridge: On-device LLM + Taxi tools
+
+/// Bridge that creates a Foundation Models session with Taxi tools registered.
+/// This allows Apple's on-device LLM to autonomously use Taxi capabilities.
+@available(macOS 26, iOS 26, *)
+public actor FoundationModelsBridge {
+
+    public init() {}
+
+    /// Get all Taxi tools for Foundation Models.
+    ///
+    /// Read-only tools only. The Foundation Models session calls each tool's
+    /// `call(arguments:)` directly — the call path bypasses the Node-side
+    /// `toolRegistry` pre-handler, so HITL approval, rate-limit, and audit
+    /// log do not see these calls. Surfacing a write tool here would let an
+    /// agentic prompt mutate state with no oversight (RFC 0001 §security and
+    /// RFC 0002 §rate-limit are not honoured on this path).
+    ///
+    /// Restoring write capability requires either:
+    ///   1. A loop-back transport that re-enters the toolRegistry (i.e. the
+    ///      Swift tool calls back into the running Node MCP server), or
+    ///   2. A Swift-side mirror of the rate-limit + HITL + audit policies.
+    /// Tracked in TODO as a v2.12+ design item.
+    public func allTools(limits: FoundationModelsBridgeLimits = FoundationModelsBridgeLimits()) -> [any Tool] {
+        let budget = FoundationModelsToolBudget(limits: limits)
+        let tools: [any Tool] = [
+            TodayEventsTool(budget: budget),
+            DueRemindersTool(budget: budget),
+            SearchContactsTool(budget: budget),
+        ]
+        return tools
+    }
+
+    /// Run a prompt with Taxi tools available to the on-device LLM.
+    /// The model autonomously decides which read-only tool to call.
+    public func run(
+        prompt: String,
+        systemInstruction: String? = nil,
+        limits: FoundationModelsBridgeLimits = FoundationModelsBridgeLimits()
+    ) async throws -> String {
+        let tools = allTools(limits: limits)
+        let instruction = systemInstruction ?? "You are a read-only assistant with access to the user's Calendar, Reminders, and Contacts. Use the available tools to answer questions about the user's data. You cannot create, modify, or delete anything — direct the user to the Taxi app for write actions."
+        let session = LanguageModelSession(tools: tools, instructions: instruction)
+        let options = GenerationOptions(maximumResponseTokens: limits.maxResponseTokens)
+        let response = try await session.respond(to: prompt, options: options)
+        return response.content
+    }
+}
+
+#else
+
+// Stub for platforms without Foundation Models
+@available(macOS 14, iOS 16, *)
+public actor FoundationModelsBridge {
+    public init() {}
+    public func run(prompt: String, systemInstruction: String? = nil) async throws -> String {
+        throw NSError(domain: "TaxiKit", code: 1, userInfo: [NSLocalizedDescriptionKey: "Foundation Models not available on this platform"])
+    }
+}
+
+#endif

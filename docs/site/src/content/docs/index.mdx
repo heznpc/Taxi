@@ -1,0 +1,50 @@
+---
+title: Taxi by Heznpc — A Local AI Workspace
+description: A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences and governed Mac tools.
+template: splash
+hero:
+  tagline: A local workspace for coordinating AI sessions and tools. Source preview — build from source on macOS.
+  actions:
+    - text: Build from source
+      link: /getting-started/installation/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/heznpc/Taxi
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What is Taxi?
+
+Taxi keeps a task's request, sessions, model preferences and evidence in one local workspace. Its native Task Dashboard coordinates explicit child-session handoffs; the governed [Model Context Protocol](https://modelcontextprotocol.io/) runtime connects Mac apps such as Notes, Mail, Calendar, Reminders, Shortcuts, Finder and Safari.
+
+**Source preview:** build from source. The npm package, Registry listing, downloadable MCPB release and signed app installer are not yet published. Repository publication does not deploy the documentation site or publish those distributions.
+
+<CardGrid stagger>
+  <Card title="Task Dashboard" icon="setting">
+    Record task phases, execution owners, parent/child relationships and results. Provider completion remains separate from verified task completion.
+  </Card>
+  <Card title="Explicit Handoffs" icon="right-arrow">
+    Carry the original request, adopted decisions, open questions, completion criteria and evidence into a separate child session. Preparation alone makes no provider call.
+  </Card>
+  <Card title="Model Preferences" icon="puzzle">
+    Choose a model and reasoning effort by phase using the embedded QuotaPie core and the provider's supported catalog. QuotaPie does not need to be installed.
+  </Card>
+  <Card title="Governed Mac Tools" icon="laptop">
+    Connect compatible MCP clients to Apple apps with approval controls, audit evidence and an emergency stop. Import Modore session metadata for observation and explicit task links.
+  </Card>
+</CardGrid>
+
+## Current boundaries
+
+Taxi-owned execution currently supports read-only Codex turns in a dedicated profile, one authorized turn at a time. Imported external sessions are observation-only and cannot be resumed. Authorized provider requests send the chosen context to the provider; local storage does not make those requests offline.
+
+The design intent is a local environment for requesting, planning, researching, implementing and reviewing work. General autonomous execution, external-session resume, resource lifecycle management and a connected compression relay are **planned**. A saved phase or routing preference does not implement them. iOS/iPadOS is experimental source; visionOS and watchOS are roadmap targets.
+
+Public examples must be synthetic or redacted. Keep task prompts, catalog metadata, private paths, credentials and local verification evidence out of public issues and commits.
+
+## Build from source
+
+Use the [source build guide](/getting-started/installation/) to compile the runtime, launch Task Dashboard and configure a local MCP client entry. macOS and Node.js 22+ are required; native builds also need the Xcode command-line toolchain.

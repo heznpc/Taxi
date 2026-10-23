@@ -1,0 +1,25 @@
+name: taxi
+description: A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences, and governed MCP access to Mac apps.
+homepage: https://github.com/heznpc/Taxi
+icon: https://raw.githubusercontent.com/heznpc/Taxi/main/icons/taxi-icon-256.png
+license: MIT
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required: [serverPath]
+    properties:
+      serverPath:
+        type: string
+        description: Absolute path to dist/index.js in your locally built Taxi source checkout
+      includeShared:
+        type: boolean
+        default: false
+        description: Include shared notes/folders in results
+  commandFunction:
+    |-
+    (config) => ({
+      command: 'node',
+      args: [config.serverPath, 'run'],
+      env: config.includeShared ? { TAXI_INCLUDE_SHARED: 'true' } : {}
+    })
