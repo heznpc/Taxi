@@ -167,7 +167,7 @@
   },
   "dependencies": {
     "@heznpc/quota-core": "file:vendor/heznpc-quota-core-0.2.0.tgz",
-    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
     "@modelcontextprotocol/sdk": "1.32.1",
     "express": "5.3.0",
     "jose": "6.2.13",
