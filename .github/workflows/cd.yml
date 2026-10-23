@@ -1,0 +1,425 @@
+name: Publish Taxi Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      npm_auth_mode:
+        description: "First v1.0.0 publish requires token; use trusted publishing only after package trust is configured."
+        required: true
+        default: token
+        type: choice
+        options:
+          - trusted-publishing
+          - token
+      release_sha:
+        description: >-
+          Resume an interrupted release only after npm already contains the exact
+          artifact for this ancestor commit. A resume may repair the GitHub Release
+          but can never create a new npm version. Leave empty for a new publish.
+        required: false
+        default: ""
+        type: string
+      signed_release_run_id:
+        description: "Successful release-app workflow run ID for this exact tag and commit."
+        required: true
+        type: string
+      signed_release_receipt_sha256:
+        description: "SHA-256 of signed-release-receipt.json from that workflow run."
+        required: true
+        type: string
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      checkout_ref: ${{ inputs.release_sha || github.sha }}
+
+  publish:
+    needs: ci
+    runs-on: macos-latest
+    environment: npm
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # release_sha exists for one situation: a release commit published the root
+      # package and then a later step failed, and by the time the fallback rerun
+      # is dispatched main has already advanced — so github.sha no longer matches
+      # the registry gitHead and the identity check can never pass. The resume
+      # path keeps both supply-chain invariants: the dispatch still comes from
+      # refs/heads/main, and the resumed commit must be an ancestor of that main.
+      - name: Verify release source
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+        run: |
+          if [ "$RELEASE_REF" != "refs/heads/main" ]; then
+            echo "::error::Publishing is allowed only from refs/heads/main, got $RELEASE_REF"
+            exit 1
+          fi
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          if [ "$CHECKED_OUT_SHA" != "$RELEASE_SHA" ]; then
+            echo "::error::Checked-out commit $CHECKED_OUT_SHA does not match release commit $RELEASE_SHA"
+            exit 1
+          fi
+          if [ "$RELEASE_SHA" != "$WORKFLOW_SHA" ]; then
+            if ! git merge-base --is-ancestor "$RELEASE_SHA" "$WORKFLOW_SHA"; then
+              echo "::error::release_sha $RELEASE_SHA is not an ancestor of the dispatched main commit $WORKFLOW_SHA"
+              exit 1
+            fi
+            echo "::notice::Resuming interrupted publish of $RELEASE_SHA (main is at $WORKFLOW_SHA)."
+          fi
+
+      - name: Extract package info
+        id: pkg
+        run: |
+          NAME=$(node -e "console.log(require('./package.json').name)")
+          VERSION=$(node -e "console.log(require('./package.json').version)")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $NAME@$VERSION"
+
+      - name: Version guard
+        run: |
+          if ! git show-ref --tags --verify --quiet "refs/tags/v${{ steps.pkg.outputs.version }}"; then
+            echo "::error::Tag v${{ steps.pkg.outputs.version }} does not exist. Run the protected signed-app workflow from the public tag first."
+            exit 1
+          fi
+          TAG_SHA="$(git rev-parse "refs/tags/v${{ steps.pkg.outputs.version }}^{commit}")"
+          if [ "$TAG_SHA" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::Tag v${{ steps.pkg.outputs.version }} exists at $TAG_SHA, not at the release commit. Bump the version first."
+            exit 1
+          fi
+          echo "Immutable tag v${{ steps.pkg.outputs.version }} points at the release commit."
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 22
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install checksum-pinned GitHub CLI
+        run: bash scripts/install-pinned-gh.sh
+
+      # npm versions are immutable. Refuse to create even the first registry
+      # artifact unless both this publish lane and the completed upstream signed
+      # lane are protected by review and no-admin-bypass. This main-dispatched
+      # job requires a main-only branch policy; the signed lane requires its
+      # exact release tag. Query both before any dependency or lifecycle code.
+      - name: Verify publish environment protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+        run: |
+          node scripts/verify-release-environment.mjs \
+            --repo="${{ github.repository }}" \
+            --ref-name=main \
+            --ref-type=branch \
+            --environment=npm
+          node scripts/verify-release-environment.mjs \
+            --repo="${{ github.repository }}" \
+            --ref-name="$RELEASE_TAG" \
+            --ref-type=tag \
+            --environment=release
+
+      - name: Download signed release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED_RUN_ID: ${{ inputs.signed_release_run_id }}
+          SIGNED_RECEIPT_SHA256: ${{ inputs.signed_release_receipt_sha256 }}
+        run: |
+          if [[ ! "$SIGNED_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::signed_release_run_id must be a positive workflow run ID"
+            exit 1
+          fi
+          if [[ ! "$SIGNED_RECEIPT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::signed_release_receipt_sha256 must be 64 hexadecimal characters"
+            exit 1
+          fi
+          mkdir -p build/signed-candidate
+          gh run download "$SIGNED_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "taxi-signed-candidate-$SIGNED_RUN_ID" \
+            --dir build/signed-candidate
+
+      - name: Decrypt signed release candidate
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+          TAXI_RELEASE_CANDIDATE_KEY_BASE64: ${{ secrets.TAXI_RELEASE_CANDIDATE_KEY_BASE64 }}
+        run: |
+          node scripts/signed-release-receipt-crypto.mjs decrypt \
+            --input="build/signed-candidate/Taxi-${VERSION}.zip.enc" \
+            --output="build/signed-candidate/Taxi-${VERSION}.zip"
+          node scripts/signed-release-receipt-crypto.mjs decrypt \
+            --input=build/signed-candidate/signed-release-receipt.json.enc \
+            --output=build/signed-candidate/signed-release-receipt.json
+
+      - name: Verify signed release receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          SIGNED_RUN_ID: ${{ inputs.signed_release_run_id }}
+          SIGNED_RECEIPT_SHA256: ${{ inputs.signed_release_receipt_sha256 }}
+        run: |
+          node scripts/verify-signed-release-receipt.mjs \
+            --receipt=build/signed-candidate/signed-release-receipt.json \
+            --archive="build/signed-candidate/Taxi-${VERSION}.zip" \
+            --repository="$GITHUB_REPOSITORY" \
+            --run-id="$SIGNED_RUN_ID" \
+            --receipt-sha256="$SIGNED_RECEIPT_SHA256" \
+            --head-sha="$RELEASE_SHA" \
+            --tag="$RELEASE_TAG" \
+            --version="$VERSION"
+
+      # No third-party dependency or package lifecycle code runs before the
+      # protected signed-app receipt above has been verified. The checkout also
+      # retains no repository write credential.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      # npm trusted publishing (OIDC → registry token exchange) requires
+      # npm >= 11.5.1; the npm bundled with Node 22 is 10.x, which signs
+      # provenance but sends the registry PUT unauthenticated (surfaces as
+      # E404 on an OIDC-only package).
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@12.0.2
+          npm --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The exact production app has already passed the protected signed lane.
+      # This lane rebuilds and validates only the npm and MCPB artifacts it owns.
+      - name: Release preflight (npm + MCPB)
+        run: npm run release:preflight
+
+      # An interrupted earlier attempt may already have published part of this
+      # immutable version. Resume only when the registry tarball SRI and
+      # npm gitHead prove it is byte-for-byte the artifact from github.sha.
+      - name: Inspect root registry identity
+        id: root-identity
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: >-
+          node scripts/verify-publish-identity.mjs
+          --tarball="build/release-preflight/taxi-${VERSION}.tgz"
+          --allow-missing
+          --expected-sha="$RELEASE_SHA"
+
+      # npm provenance binds to the workflow's dispatched commit, not merely to
+      # the separately checked-out tree. An ancestor resume is therefore safe
+      # only for repairing the GitHub Release after the exact npm bytes already
+      # exist; it must never create a new package version with contradictory
+      # provenance.
+      - name: Enforce resume mutation boundary
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          CURRENT_VERSION_PUBLISHED: ${{ steps.root-identity.outputs.published }}
+        run: |
+          if [ "$RELEASE_SHA" != "$WORKFLOW_SHA" ] && [ "$CURRENT_VERSION_PUBLISHED" != "true" ]; then
+            echo "::error::release_sha resume is allowed only after the exact npm artifact is already published; dispatch the new publish from the release commit itself"
+            exit 1
+          fi
+
+      - name: Select npm auth mode
+        id: npm-auth
+        env:
+          NPM_AUTH_MODE: ${{ inputs.npm_auth_mode || 'token' }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.pkg.outputs.version }}
+          CURRENT_VERSION_PUBLISHED: ${{ steps.root-identity.outputs.published }}
+        run: |
+          if [ "$PACKAGE_VERSION" = "1.0.0" ] && \
+             [ "$CURRENT_VERSION_PUBLISHED" != "true" ] && \
+             [ "$NPM_AUTH_MODE" != "token" ]; then
+            echo "::error::The first @heznpc/taxi@1.0.0 publish must use an approved granular NPM_TOKEN; trusted publishing can be configured only after the package exists."
+            exit 1
+          fi
+          case "$NPM_AUTH_MODE" in
+            trusted-publishing)
+              echo "mode=trusted-publishing" >> "$GITHUB_OUTPUT"
+              echo "::notice::Using npm trusted publishing. NPM_TOKEN is ignored even if the secret is set."
+              ;;
+            token)
+              if [ "$CURRENT_VERSION_PUBLISHED" != "true" ] && [ -z "${NPM_TOKEN:-}" ]; then
+                echo "::error::npm_auth_mode=token requires the NPM_TOKEN secret before publishing."
+                exit 1
+              fi
+              echo "mode=token" >> "$GITHUB_OUTPUT"
+              echo "::notice::Using an approved granular NPM_TOKEN for initial package bootstrap or explicit fallback."
+              ;;
+            *)
+              echo "::error::Unsupported npm_auth_mode: $NPM_AUTH_MODE"
+              exit 1
+              ;;
+          esac
+
+      - name: npm auth preflight
+        if: steps.npm-auth.outputs.mode == 'token' && steps.root-identity.outputs.published != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm whoami
+
+      - name: Re-verify immutable remote tag before npm publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+        run: >-
+          node scripts/verify-remote-release-tag.mjs
+          --repo="${{ github.repository }}"
+          --tag="$RELEASE_TAG"
+          --expected-sha="$RELEASE_SHA"
+
+      - name: Classify GitHub Release before npm publish
+        id: pre-npm-github-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+        run: >-
+          node scripts/classify-existing-github-release.mjs
+          --repo="${{ github.repository }}"
+          --tag="$RELEASE_TAG"
+          --expected-sha="$RELEASE_SHA"
+
+      - name: Verify existing immutable GitHub Release before npm publish
+        if: steps.pre-npm-github-release.outputs.state == 'immutable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: >-
+          npm run release:verify --
+          --skip-npx
+          --skip-root-install
+          --expected-sha="$RELEASE_SHA"
+          --tarball="build/release-preflight/taxi-${VERSION}.tgz"
+          --mcpb="build/release-preflight/taxi-${VERSION}.mcpb"
+          --app-archive="build/signed-candidate/Taxi-${VERSION}.zip"
+
+      - name: Publish root with provenance
+        if: steps.npm-auth.outputs.mode == 'trusted-publishing' && steps.root-identity.outputs.published != 'true'
+        run: npm publish "build/release-preflight/taxi-${{ steps.pkg.outputs.version }}.tgz" --provenance --access public
+
+      - name: Publish root with provenance (token fallback)
+        if: steps.npm-auth.outputs.mode == 'token' && steps.root-identity.outputs.published != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "build/release-preflight/taxi-${{ steps.pkg.outputs.version }}.tgz" --provenance --access public
+
+      - name: Verify root registry identity
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: >-
+          node scripts/verify-publish-identity.mjs
+          --tarball="build/release-preflight/taxi-${VERSION}.tgz"
+          --retry-seconds=600
+          --expected-sha="$RELEASE_SHA"
+
+      - name: Re-verify immutable remote tag before GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+        run: >-
+          node scripts/verify-remote-release-tag.mjs
+          --repo="${{ github.repository }}"
+          --tag="$RELEASE_TAG"
+          --expected-sha="$RELEASE_SHA"
+
+      - name: Classify existing GitHub Release
+        id: github-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+        run: >-
+          node scripts/classify-existing-github-release.mjs
+          --repo="${{ github.repository }}"
+          --tag="$RELEASE_TAG"
+          --expected-sha="$RELEASE_SHA"
+
+      - name: Verify existing immutable GitHub Release before resume
+        if: steps.github-release.outputs.state == 'immutable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: >-
+          npm run release:verify --
+          --skip-npx
+          --skip-root-install
+          --expected-sha="$RELEASE_SHA"
+          --tarball="build/release-preflight/taxi-${VERSION}.tgz"
+          --mcpb="build/release-preflight/taxi-${VERSION}.mcpb"
+          --app-archive="build/signed-candidate/Taxi-${VERSION}.zip"
+
+      # Dependency lifecycle and artifact builds ran after the first receipt
+      # check. Rebind the exact ZIP bytes to the protected signed-lane receipt
+      # immediately before the one public action that can upload them.
+      - name: Re-verify signed candidate immediately before GitHub Release
+        if: steps.github-release.outputs.state == 'missing'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          RELEASE_TAG: v${{ steps.pkg.outputs.version }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          SIGNED_RUN_ID: ${{ inputs.signed_release_run_id }}
+          SIGNED_RECEIPT_SHA256: ${{ inputs.signed_release_receipt_sha256 }}
+        run: |
+          node scripts/verify-signed-release-receipt.mjs \
+            --receipt=build/signed-candidate/signed-release-receipt.json \
+            --archive="build/signed-candidate/Taxi-${VERSION}.zip" \
+            --repository="$GITHUB_REPOSITORY" \
+            --run-id="$SIGNED_RUN_ID" \
+            --receipt-sha256="$SIGNED_RECEIPT_SHA256" \
+            --head-sha="$RELEASE_SHA" \
+            --tag="$RELEASE_TAG" \
+            --version="$VERSION"
+
+      - name: Create GitHub Release
+        if: steps.github-release.outputs.state == 'missing'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v2.5.0
+        with:
+          token: ${{ github.token }}
+          tag_name: v${{ steps.pkg.outputs.version }}
+          target_commitish: ${{ inputs.release_sha || github.sha }}
+          name: v${{ steps.pkg.outputs.version }}
+          generate_release_notes: true
+          files: |
+            build/release-preflight/taxi-${{ steps.pkg.outputs.version }}.mcpb
+            build/signed-candidate/Taxi-${{ steps.pkg.outputs.version }}.zip
+          fail_on_unmatched_files: true
+          overwrite_files: true
+
+      - name: Verify public release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha || github.sha }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: >-
+          npm run release:verify --
+          --expected-sha="$RELEASE_SHA"
+          --tarball="build/release-preflight/taxi-${VERSION}.tgz"
+          --mcpb="build/release-preflight/taxi-${VERSION}.mcpb"
+          --app-archive="build/signed-candidate/Taxi-${VERSION}.zip"

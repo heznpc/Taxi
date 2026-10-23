@@ -1,0 +1,67 @@
+name: Release Candidate Handoff
+
+# Triggers when a version-bump commit lands on main (e.g., "chore: release v1.0.1").
+# It intentionally does not dispatch CD. Publication requires a protected
+# release-app run from the immutable version tag plus the exact receipt hash;
+# those values do not exist at version-bump time.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect-release:
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.check.outputs.is_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          fetch-tags: true
+
+      - name: Check if this is a release commit
+        id: check
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          VERSION=$(node -e "console.log(require('./package.json').version)")
+
+          # Match conventional release commits: "chore: release v*" or "chore(release): v*"
+          if echo "$MSG" | grep -qE '^chore(\(release\))?:.*v[0-9]+\.[0-9]+\.[0-9]+'; then
+            # A version tag starts the protected signed candidate workflow. Do
+            # not create the tag or dispatch publication from this automation.
+            if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+              echo "Tag v$VERSION already exists — signed candidate workflow owns the next gate"
+              echo "is_release=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Release commit detected: $MSG (v$VERSION)"
+              echo "is_release=true" >> "$GITHUB_OUTPUT"
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Not a release commit — skipping"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish-handoff:
+    needs: detect-release
+    if: needs.detect-release.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record protected publish handoff
+        env:
+          VERSION: ${{ needs.detect-release.outputs.version }}
+        run: |
+          {
+            echo "### Taxi v${VERSION} is ready for the protected release sequence"
+            echo
+            echo "1. After external approval, create and push immutable tag \`v${VERSION}\`."
+            echo "2. Approve the protected release-app environment and wait for its signed candidate artifact."
+            echo "3. Copy its run ID and receipt SHA-256 into the Publish Taxi Release workflow dispatch."
+            echo
+            echo "No package, release, tag, or publish workflow was created by this job."
+          } >> "$GITHUB_STEP_SUMMARY"

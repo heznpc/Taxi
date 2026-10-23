@@ -1,0 +1,574 @@
+import { approvalRequestDigest } from "./approval-evidence.js";
+import type { McpServer } from "./mcp.js";
+import type { TaxiConfig, HitlLevel } from "./config.js";
+import type { HitlApprovalDecision, HitlClient } from "./hitl.js";
+import { errPermission, toolErr } from "./result.js";
+import { traceApproval } from "./telemetry.js";
+import { getRequestContext, runWithRequestContext, type RequestContext } from "./request-context.js";
+import { randomUUID } from "node:crypto";
+import {
+  getResourceGovernance,
+  isResourceTemplateRegistration,
+  resourceAuditName,
+  resourceRequestMetadata,
+} from "./resource-governance.js";
+
+/** Sentinel: elicitation offered no channel for this call — caller falls back. */
+const NOT_HANDLED = Symbol("hitl-elicitation-not-handled");
+
+export interface PendingApprovalAuditEvent {
+  /** Cryptographically random per-decision identity. Correlation IDs group a
+   * workflow; they are deliberately not authority for one specific call. */
+  approvalId: string;
+  approvalRequestDigest: string;
+  timestamp: string;
+  tool: string;
+  decision: HitlApprovalDecision;
+  channel: "elicitation" | "socket" | "unavailable";
+  correlationId?: string;
+  actor?: string;
+}
+
+type ApprovalAuditSink = (event: PendingApprovalAuditEvent) => void | Promise<void>;
+
+interface ApprovalRequestContext extends RequestContext {
+  __taxiApprovalAuditEvents?: PendingApprovalAuditEvent[];
+  __taxiApprovalAuditSink?: ApprovalAuditSink;
+}
+
+function normalizeApprovalDecision(value: unknown): HitlApprovalDecision {
+  switch (value) {
+    case "approved":
+    case "denied":
+    case "timed_out":
+    case "unavailable":
+      return value;
+    default:
+      return "unavailable";
+  }
+}
+
+async function recordApprovalDecision(
+  tool: string,
+  decision: PendingApprovalAuditEvent["decision"],
+  channel: PendingApprovalAuditEvent["channel"],
+  requestDigest: string,
+): Promise<void> {
+  const context = getRequestContext() as ApprovalRequestContext | undefined;
+  if (!context) return;
+  const event: PendingApprovalAuditEvent = {
+    approvalId: randomUUID(),
+    approvalRequestDigest: requestDigest,
+    timestamp: new Date().toISOString(),
+    tool,
+    decision,
+    channel,
+    ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+    ...(context.actor ? { actor: context.actor } : {}),
+  };
+  if (context.__taxiApprovalAuditSink) {
+    await context.__taxiApprovalAuditSink(event);
+    return;
+  }
+  const events = context.__taxiApprovalAuditEvents ?? [];
+  events.push(event);
+  context.__taxiApprovalAuditEvents = events;
+}
+
+/** Run a guarded handler with the registry-owned durable audit sink. The HITL
+ * wrapper awaits this sink before invoking an approved callback, so the
+ * approval row is sealed before any mutation can begin. */
+export function runWithApprovalAuditSink<T>(sink: ApprovalAuditSink, fn: () => T): T {
+  const context = getRequestContext() as ApprovalRequestContext | undefined;
+  const nextContext = {
+    ...(context ?? {}),
+    __taxiApprovalAuditSink: sink,
+  } as ApprovalRequestContext;
+  return runWithRequestContext(nextContext, fn);
+}
+
+/** Consume decisions queued when HITL wrapped the registry rather than the
+ * registry wrapping HITL. Sharing and splicing the array keeps nested request
+ * contexts from replaying the same event. */
+export function consumeApprovalAuditEvents(): PendingApprovalAuditEvent[] {
+  const context = getRequestContext() as ApprovalRequestContext | undefined;
+  if (!context?.__taxiApprovalAuditEvents?.length) return [];
+  return context.__taxiApprovalAuditEvents.splice(0);
+}
+
+interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  sensitiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/** The MCP SDK passes RequestHandlerExtra as the final callback argument: the
+ * only argument for schema-less tools, the second argument for schema tools,
+ * and the final argument for fixed/template resources. Keep this structural
+ * so the lightweight MCP facade does not import the SDK's generic types. */
+function requestWasCancelled(args: readonly unknown[]): boolean {
+  const extra = args.at(-1);
+  if (!extra || typeof extra !== "object" || !("signal" in extra)) return false;
+  const signal = (extra as { signal?: unknown }).signal;
+  return Boolean(signal && typeof signal === "object" && "aborted" in signal && signal.aborted === true);
+}
+
+/**
+ * Clients where MCP elicitation should be skipped.
+ *
+ * All Claude products (Desktop, Code, Cowork, Managed Agents, etc.) are detected
+ * via the "claude" prefix on `clientInfo.name`. Non-Claude managed clients can be
+ * added via the `TAXI_MANAGED_CLIENTS` env var (comma-separated, case-insensitive).
+ *
+ * Socket-based HITL remains active as it's a separate, explicit channel.
+ */
+
+let extraManagedClients: ReadonlySet<string> | undefined;
+
+function getExtraManagedClients(): ReadonlySet<string> {
+  if (!extraManagedClients) {
+    const raw = process.env.TAXI_MANAGED_CLIENTS ?? "";
+    extraManagedClients = new Set(
+      raw
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    );
+  }
+  return extraManagedClients;
+}
+
+/**
+ * Returns true if the connected MCP client has its own permission management,
+ * making MCP elicitation redundant (would cause double-approval).
+ *
+ * Detection: "claude" prefix covers all Anthropic clients (Claude Code, Desktop,
+ * Cowork, Managed Agents). `TAXI_MANAGED_CLIENTS` env var covers third-party
+ * managed clients in enterprise deployments.
+ */
+function isManagedClient(server: McpServer): boolean {
+  try {
+    const info = server.server?.getClientVersion?.();
+    if (!info?.name) return false;
+    const name = info.name.toLowerCase();
+    return name.startsWith("claude") || getExtraManagedClients().has(name);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pure gating predicate: does a tool with these annotations require HITL
+ * approval at the given level? Exported so tests can lock the monotonic
+ * ordering off ⊆ destructive-only ⊆ sensitive-only ⊆ all-writes ⊆ all
+ * (review finding #3/#5). No side effects.
+ */
+export function shouldRequireApproval(
+  level: HitlLevel,
+  annotations: ToolAnnotations,
+  whitelist: Set<string>,
+  toolName: string,
+): boolean {
+  if (whitelist.has(toolName)) return false;
+  switch (level) {
+    case "off":
+      return false;
+    case "destructive-only":
+      return annotations.destructiveHint === true;
+    case "sensitive-only":
+      return annotations.destructiveHint === true || annotations.sensitiveHint === true;
+    case "all-writes":
+      // Must be a superset of "sensitive-only": the init wizard presents
+      // Recommended(sensitive-only) then Strict(all-writes) as increasing
+      // strictness, so anything sensitive-only gates must also gate here.
+      // Plain `readOnlyHint === false` missed sensitive-but-readonly tools
+      // (health_*, get_clipboard, capture_screen, ui_read) which carry
+      // readOnlyHint: true + sensitiveHint: true — breaking monotonicity.
+      return (
+        annotations.readOnlyHint === false || annotations.destructiveHint === true || annotations.sensitiveHint === true
+      );
+    case "all":
+      return true;
+  }
+}
+
+/**
+ * Try MCP Elicitation (form mode) for approval. Returns undefined if
+ * the client does not support elicitation, letting the caller fall back.
+ */
+async function tryElicitApproval(
+  server: McpServer,
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+  destructive: boolean,
+  sensitive: boolean,
+): Promise<boolean | undefined> {
+  // RFC 0008 §3.3 — operator opt-out for end-to-end scripted pipelines
+  // that don't want any user prompt. When set, every call falls through
+  // to the socket HITL channel (or the no-prompt path) just like a
+  // client that doesn't advertise elicitation.
+  if (process.env.TAXI_ELICITATION_DISABLE === "true") return undefined;
+
+  try {
+    const inner = server.server;
+    if (!inner?.elicitInput) return undefined;
+
+    // RFC 0008 §3.2 — capability gate. Honoring the negotiated capability
+    // up-front avoids waiting on a doomed request when the client declared
+    // no elicitation support; the try/catch around the call below stays as
+    // a belt-and-suspenders fallback for clients that lie about it.
+    const caps = inner.getClientCapabilities?.();
+    if (caps && !caps.elicitation) return undefined;
+
+    const label = destructive
+      ? `⚠️ Destructive: ${toolName}`
+      : sensitive
+        ? `⚠️ Sensitive: ${toolName}`
+        : `Approve: ${toolName}`;
+    const argsSummary = JSON.stringify(toolArgs, null, 2);
+
+    if (argsSummary.length > 32_000) return undefined;
+
+    const result = await inner.elicitInput({
+      message: `${label}\n\nArguments:\n${argsSummary}`,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          approve: {
+            type: "boolean",
+            title: `Allow "${toolName}" to execute?`,
+            default: false,
+          },
+        },
+        required: ["approve"],
+      },
+    });
+
+    if (result.action === "accept" && result.content?.approve === true) {
+      return true;
+    }
+    return false;
+  } catch {
+    // Client doesn't support elicitation — return undefined to signal fallback
+    return undefined;
+  }
+}
+
+/**
+ * Monkey-patches server.registerTool and classified server.registerResource
+ * callbacks so both surfaces use the same per-call approval policy.
+ *
+ * Channel order (gated-call approval is preserved in every path — only the
+ * channel that answers differs by what is actually available):
+ * - non-managed clients: MCP elicitation → socket HITL → deny
+ * - managed clients:     socket HITL (if reachable) → MCP elicitation →
+ *                        deny with an actionable message
+ *
+ * Managed clients (the Claude family + TAXI_MANAGED_CLIENTS) run their own
+ * per-call permission prompt, so elicitation is skipped while the socket can
+ * answer — the menubar app stays the explicit approver when it is running.
+ * But in the default headless setup (`taxi`, no companion app) nothing
+ * listens on that socket, and the old order hard-denied every gated tool out
+ * of the box — issue #28's reporter resolved it by setting hitl level "off",
+ * i.e. the safety feature got disabled by its own UX. Falling back to
+ * elicitation keeps a human in the loop instead (RFC 0008 Phase 1.5).
+ */
+export function installHitlGuard(server: McpServer, hitlClient: HitlClient, config: TaxiConfig): void {
+  const original = server.registerTool.bind(server);
+
+  const patched = (
+    name: string,
+    toolConfig: { annotations?: ToolAnnotations; [key: string]: unknown },
+    callback: (...args: unknown[]) => unknown,
+  ) => {
+    const annotations: ToolAnnotations = toolConfig.annotations ?? {};
+
+    if (!shouldRequireApproval(config.hitl.level, annotations, config.hitl.whitelist, name)) {
+      return original(name, toolConfig as Parameters<typeof original>[1], callback as Parameters<typeof original>[2]);
+    }
+
+    const telemetryEnabled = process.env.TAXI_TELEMETRY === "true";
+
+    const wrapped = async (...args: unknown[]) => {
+      const toolArgs = (args[0] ?? {}) as Record<string, unknown>;
+      const requestDigest = approvalRequestDigest(name, toolArgs);
+      const destructive = annotations.destructiveHint ?? false;
+      const sensitive = annotations.sensitiveHint ?? false;
+      const managed = isManagedClient(server);
+      const cancelledResult = () =>
+        errPermission(`Action denied: request for "${name}" was cancelled; the action was not executed.`);
+      const invokeApprovedCallback = () =>
+        requestWasCancelled(args) ? cancelledResult() : (callback as (...a: unknown[]) => unknown)(...args);
+
+      // Do not prompt for a request the client has already abandoned. The
+      // approved callback helper repeats this check after both the decision
+      // and the durable approval-audit write.
+      if (requestWasCancelled(args)) return cancelledResult();
+
+      // Resolve the call through MCP elicitation. Returns NOT_HANDLED when the
+      // client offers no elicitation channel, so the caller can fall back.
+      const viaElicitation = async (): Promise<unknown> => {
+        const elicitResult = await tryElicitApproval(server, name, toolArgs, destructive, sensitive);
+        if (elicitResult === undefined) return NOT_HANDLED;
+        if (telemetryEnabled) {
+          traceApproval(name, elicitResult ? "approved" : "denied", "elicitation", { destructive, managed });
+        }
+        await recordApprovalDecision(name, elicitResult ? "approved" : "denied", "elicitation", requestDigest);
+        if (!elicitResult) {
+          return errPermission(`Action denied: "${name}" was rejected via MCP elicitation.`);
+        }
+        return invokeApprovedCallback();
+      };
+
+      if (!managed) {
+        // Elicitation first — managed clients skip it here to avoid a double
+        // prompt on top of their own per-call permission UX.
+        const handled = await viaElicitation();
+        if (handled !== NOT_HANDLED) return handled;
+      } else if (!(await hitlClient.isReachable())) {
+        // Managed client, but nothing is listening on the approval socket
+        // (headless `taxi` without the menubar app). Elicitation is the
+        // only channel that can still put a human in the loop — use it.
+        const handled = await viaElicitation();
+        if (handled !== NOT_HANDLED) return handled;
+        // No approval channel exists at all: deny this call, and say how to fix it.
+        if (telemetryEnabled) {
+          traceApproval(name, "denied", "unavailable", { destructive, managed });
+        }
+        await recordApprovalDecision(name, "unavailable", "unavailable", requestDigest);
+        return errPermission(
+          `Action denied: "${name}" requires approval for this call, but no approval channel is available. ` +
+            `Start the Taxi menubar app, use an MCP client that supports elicitation, ` +
+            `or adjust hitl.whitelist / hitl.level in ~/.config/taxi/config.json.`,
+        );
+      }
+
+      // Socket-based HITL (managed client with the app reachable, or fallback
+      // for non-managed clients without elicitation support).
+      if (!(await hitlClient.isReachable())) {
+        if (telemetryEnabled) {
+          traceApproval(name, "denied", "unavailable", { destructive, managed });
+        }
+        await recordApprovalDecision(name, "unavailable", "unavailable", requestDigest);
+        return errPermission(
+          `Action denied: "${name}" requires approval for this call, but the Taxi approval socket is unavailable. ` +
+            `Start the Taxi menubar app or use an MCP client that supports elicitation.`,
+        );
+      }
+      const decisionClient = hitlClient as unknown as {
+        requestApprovalDecision?: (
+          tool: string,
+          args: Record<string, unknown>,
+          destructive: boolean,
+          openWorld: boolean,
+          sensitive?: boolean,
+        ) => Promise<HitlApprovalDecision>;
+      };
+      const rawDecision =
+        typeof decisionClient.requestApprovalDecision === "function"
+          ? await decisionClient.requestApprovalDecision.call(
+              hitlClient,
+              name,
+              toolArgs,
+              destructive,
+              annotations.openWorldHint ?? false,
+              sensitive,
+            )
+          : (await hitlClient.requestApproval(
+                name,
+                toolArgs,
+                destructive,
+                annotations.openWorldHint ?? false,
+                sensitive,
+              ))
+            ? "approved"
+            : "denied";
+      const decision = normalizeApprovalDecision(rawDecision);
+      if (telemetryEnabled) {
+        traceApproval(name, decision, "socket", { destructive, managed });
+      }
+      await recordApprovalDecision(name, decision, "socket", requestDigest);
+      if (decision === "timed_out") {
+        return toolErr(
+          "hitl_timeout",
+          `Action denied: approval for "${name}" timed out before a decision. ` +
+            `The prompt may not have been visible: check the pending approvals under the Taxi menubar icon ` +
+            `(or its Trust Center window), allow notifications for Taxi in System Settings → Notifications, ` +
+            `then retry the call.`,
+        );
+      }
+      if (decision === "unavailable") {
+        return errPermission(
+          `Action denied: the Taxi approval socket became unavailable before "${name}" received a decision. ` +
+            `Restart the Taxi menubar app and retry the call.`,
+        );
+      }
+      if (decision === "denied") {
+        return errPermission(`Action denied: "${name}" requires user approval. The user denied this call.`);
+      }
+      if (decision !== "approved") {
+        return errPermission(`Action denied: "${name}" did not receive a valid approval decision.`);
+      }
+      return invokeApprovedCallback();
+    };
+
+    return original(name, toolConfig as Parameters<typeof original>[1], wrapped as Parameters<typeof original>[2]);
+  };
+  server.registerTool = patched as typeof server.registerTool;
+
+  // Resource callbacks have a different wire contract from tool callbacks:
+  // returning `errPermission()` would be interpreted as a malformed
+  // ReadResourceResult. Denials therefore throw a categorized JSON-RPC error,
+  // while approved callbacks retain their native `{ contents: [...] }` shape.
+  if (typeof server.registerResource === "function") {
+    const originalResource = server.registerResource.bind(server);
+    const resourceDeny = (category: "permission_denied" | "hitl_timeout", message: string): never => {
+      throw new Error(`[${category}] ${message}`);
+    };
+    const wrapResource = (
+      governedName: string,
+      annotations: ToolAnnotations,
+      callback: (...args: unknown[]) => unknown,
+      isTemplate: boolean,
+    ) => {
+      const telemetryEnabled = process.env.TAXI_TELEMETRY === "true";
+      return async (...args: unknown[]) => {
+        const requestArgs = resourceRequestMetadata(args, isTemplate);
+        const requestDigest = approvalRequestDigest(governedName, requestArgs);
+        const sensitive = annotations.sensitiveHint === true;
+        const managed = isManagedClient(server);
+        const denyCancelled = (): never =>
+          resourceDeny(
+            "permission_denied",
+            `Action denied: request for "${governedName}" was cancelled; the action was not executed.`,
+          );
+        const invokeApprovedCallback = () => (requestWasCancelled(args) ? denyCancelled() : callback(...args));
+
+        if (requestWasCancelled(args)) return denyCancelled();
+
+        const viaElicitation = async (): Promise<unknown> => {
+          const result = await tryElicitApproval(server, governedName, requestArgs, false, sensitive);
+          if (result === undefined) return NOT_HANDLED;
+          if (telemetryEnabled) {
+            traceApproval(governedName, result ? "approved" : "denied", "elicitation", {
+              destructive: false,
+              managed,
+            });
+          }
+          await recordApprovalDecision(governedName, result ? "approved" : "denied", "elicitation", requestDigest);
+          if (!result) {
+            return resourceDeny(
+              "permission_denied",
+              `Action denied: "${governedName}" was rejected via MCP elicitation.`,
+            );
+          }
+          return invokeApprovedCallback();
+        };
+
+        if (!managed) {
+          const handled = await viaElicitation();
+          if (handled !== NOT_HANDLED) return handled;
+        } else if (!(await hitlClient.isReachable())) {
+          const handled = await viaElicitation();
+          if (handled !== NOT_HANDLED) return handled;
+          if (telemetryEnabled) {
+            traceApproval(governedName, "denied", "unavailable", { destructive: false, managed });
+          }
+          await recordApprovalDecision(governedName, "unavailable", "unavailable", requestDigest);
+          return resourceDeny(
+            "permission_denied",
+            `Action denied: "${governedName}" requires approval, but no approval channel is available. ` +
+              `Start the Taxi menubar app or use an MCP client that supports elicitation.`,
+          );
+        }
+
+        if (!(await hitlClient.isReachable())) {
+          if (telemetryEnabled) {
+            traceApproval(governedName, "denied", "unavailable", { destructive: false, managed });
+          }
+          await recordApprovalDecision(governedName, "unavailable", "unavailable", requestDigest);
+          return resourceDeny(
+            "permission_denied",
+            `Action denied: "${governedName}" requires approval, but the Taxi approval socket is unavailable.`,
+          );
+        }
+
+        const decisionClient = hitlClient as unknown as {
+          requestApprovalDecision?: (
+            tool: string,
+            requestArgs: Record<string, unknown>,
+            destructive: boolean,
+            openWorld: boolean,
+            sensitive?: boolean,
+          ) => Promise<HitlApprovalDecision>;
+        };
+        const rawDecision =
+          typeof decisionClient.requestApprovalDecision === "function"
+            ? await decisionClient.requestApprovalDecision.call(
+                hitlClient,
+                governedName,
+                requestArgs,
+                false,
+                false,
+                sensitive,
+              )
+            : (await hitlClient.requestApproval(governedName, requestArgs, false, false, sensitive))
+              ? "approved"
+              : "denied";
+        const decision = normalizeApprovalDecision(rawDecision);
+        if (telemetryEnabled) {
+          traceApproval(governedName, decision, "socket", { destructive: false, managed });
+        }
+        await recordApprovalDecision(governedName, decision, "socket", requestDigest);
+        if (decision === "timed_out") {
+          return resourceDeny(
+            "hitl_timeout",
+            `Action denied: approval for "${governedName}" timed out before a decision. ` +
+              `The prompt may not have been visible: check the pending approvals under the Taxi menubar icon ` +
+              `(or its Trust Center window), allow notifications for Taxi in System Settings → Notifications, ` +
+              `then retry the call.`,
+          );
+        }
+        if (decision === "unavailable") {
+          return resourceDeny(
+            "permission_denied",
+            `Action denied: the approval channel became unavailable before "${governedName}" received a decision. ` +
+              `Restart the Taxi menubar app and retry the call.`,
+          );
+        }
+        if (decision === "denied") {
+          return resourceDeny(
+            "permission_denied",
+            `Action denied: "${governedName}" requires user approval. The user denied this call.`,
+          );
+        }
+        if (decision !== "approved") {
+          return resourceDeny(
+            "permission_denied",
+            `Action denied: "${governedName}" did not receive a valid approval decision.`,
+          );
+        }
+        return invokeApprovedCallback();
+      };
+    };
+
+    server.registerResource = ((name: string, ...rest: unknown[]) => {
+      const callback = rest[rest.length - 1];
+      if (typeof callback !== "function") {
+        return (originalResource as (...args: unknown[]) => unknown)(name, ...rest);
+      }
+      const resourceCallback = callback as (...args: unknown[]) => unknown;
+      const resourceConfig = rest.length >= 3 ? rest[rest.length - 2] : undefined;
+      const annotations = getResourceGovernance(resourceConfig);
+      const governedName = resourceAuditName(name);
+      if (!shouldRequireApproval(config.hitl.level, annotations, config.hitl.whitelist, governedName)) {
+        return (originalResource as (...args: unknown[]) => unknown)(name, ...rest);
+      }
+      const isTemplate = isResourceTemplateRegistration(rest[0]);
+      rest[rest.length - 1] = wrapResource(governedName, annotations, resourceCallback, isTemplate);
+      return (originalResource as (...args: unknown[]) => unknown)(name, ...rest);
+    }) as typeof server.registerResource;
+  }
+}

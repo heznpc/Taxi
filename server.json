@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.heznpc/taxi",
+  "description": "Local workspace for coordinating AI sessions and tools. macOS source preview with MCP.",
+  "version": "1.0.0",
+  "websiteUrl": "https://github.com/heznpc/Taxi",
+  "repository": {
+    "url": "https://github.com/heznpc/Taxi",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@heznpc/taxi",
+      "version": "1.0.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

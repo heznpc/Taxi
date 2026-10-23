@@ -1,0 +1,271 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # Trigger on every PR regardless of base branch so stacked PRs
+  # (PR targeting another PR's branch — common with chained RFC work)
+  # get full CI feedback before the chain merges sequentially to main.
+  # Without this, only the stack's bottom PR shows checks, and later
+  # regressions only surface after each rebase onto main.
+  pull_request:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: "Exact commit/ref whose source must receive the full CI suite."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify requested CI source
+        if: inputs.checkout_ref != ''
+        env:
+          REQUESTED_REF: ${{ inputs.checkout_ref }}
+        run: |
+          EXPECTED_SHA="$(git rev-parse "$REQUESTED_REF^{commit}")"
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::CI checked out $ACTUAL_SHA instead of requested source $EXPECTED_SHA"
+            exit 1
+          fi
+
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for large files
+        run: |
+          LARGE=$(find . -not -path './.git/*' -not -path './node_modules/*' -type f -size +5M)
+          if [ -n "$LARGE" ]; then
+            echo "::error::Large files detected (>5 MB):"
+            echo "$LARGE"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Review route plan (RFC 0013/0014 — stratified review)
+        if: github.event_name == 'pull_request'
+        env:
+          # Pass the base ref through env (not interpolated into the run string)
+          # per the workflow-injection guidance — no shell metachar interpretation.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "$BASE_REF" --depth=1 2>/dev/null || true
+          node scripts/review-route.mjs --base "origin/$BASE_REF" --check
+        # Informational: prints the tier plan + per-area failure modes to hunt +
+        # any T0 file changed without its guard test. Not a blocker (no --strict)
+        # — its job is to make review depth match blast radius on every PR.
+
+      - name: Cache tsbuildinfo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dist/.tsbuildinfo
+          key: tsbuildinfo-${{ hashFiles('src/**/*.ts', 'tsconfig.json') }}
+          restore-keys: tsbuildinfo-
+
+      - name: Check licenses
+        run: npx license-checker --failOn "GPL-2.0;GPL-3.0;AGPL-3.0"
+
+      - name: Security audit
+        run: npm audit --audit-level=high --omit=dev
+
+      # RFC 0003 Phase 1 — non-fatal advisory: surface moderate+ findings
+      # in CI logs so reviewers can prioritise upgrades before we ratchet
+      # the hard gate down to `moderate` in Phase 2. Exit code is always 0.
+      - name: Security audit advisory (moderate+)
+        run: node scripts/summarize-audit.mjs
+        continue-on-error: true
+
+      - name: Verify npm signatures
+        run: npm audit signatures
+
+      - name: Lint
+        run: npm run lint
+
+      # lint-staged formats src/**/*.ts on commit, but that only covers files
+      # staged through a local hook — a bypassed hook, a web edit, or a merge
+      # can still land unformatted source. front-door-tools.ts drifted exactly
+      # that way and stayed red locally while every CI run passed, because
+      # nothing here checked it.
+      - name: Format check
+        run: npm run format:check
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify generated app catalog
+        run: npm run gen:app-catalog:check
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        # Activates the thresholds declared in jest.config.js; plain `npm test`
+        # does not collect coverage and silently ignores those thresholds.
+        run: npm test -- --coverage
+
+      - name: Smoke — boot server + tools/list round-trip
+        run: npm run smoke
+
+      # Drives a pinned @modelcontextprotocol/inspector --cli against the
+      # built dist/index.js (scripts/mcp-validate.mjs). Catches JSON-RPC
+      # envelope drift, embedded error envelopes, and zero-tool responses
+      # before plugin submission to anthropics/claude-plugins-community.
+      # Wrapper captures stdout AND stderr and parses the response — exit
+      # code alone is not the contract. timeout-minutes bounds a teardown
+      # bug at 2 min instead of GitHub's default 6 h.
+      - name: MCP Inspector validate
+        timeout-minutes: 2
+        run: npm run mcp:validate
+
+      - name: Profile exposure matrix
+        run: npm run profiles:check
+
+      - name: Task harness adapter wire matrix
+        run: npm run harness:check
+
+      - name: Verify public source and npm package size
+        run: npm run size:check
+
+      # Forcing function on the SHIPPED artifact (RFC 0014 root-cause). The
+      # step above boots the repo's dist/; this packs the real tarball,
+      # installs it into a CLEAN project (deps resolved fresh, no repo on
+      # PATH), and boots THAT under the inspector — the only gate that tests
+      # what `npx -y taxi` actually delivers. Catches incomplete `files`,
+      # missing dist modules (the banner.js npx crash), and a dist that
+      # builds in-repo but breaks once isolated. Asserts the default starter
+      # surface boots with the core JXA tools present.
+      - name: Verify published package boots (shipped-artifact gate)
+        timeout-minutes: 5
+        run: npm run verify:package
+
+      - name: Verify tool manifest (RFC 0007 A.0)
+        run: |
+          npm run gen:manifest
+          echo "--- diff (should be empty) ---"
+          git --no-pager diff --stat docs/tool-manifest.json || true
+          git --no-pager diff docs/tool-manifest.json | head -200 || true
+          git diff --exit-code docs/tool-manifest.json
+
+      - name: Verify manifest schema contract
+        run: node scripts/verify-tool-manifest.mjs
+
+      - name: Verify MCPB extension manifest (Claude Desktop bundle)
+        run: npm run build:mcpb:check
+
+      - name: Verify generated Swift intents (RFC 0007 A.1)
+        run: |
+          npm run gen:intents
+          echo "--- diff (should be empty) ---"
+          git --no-pager diff --stat swift/Sources/TaxiKit/Generated/MCPIntents.swift || true
+          git --no-pager diff swift/Sources/TaxiKit/Generated/MCPIntents.swift | head -200 || true
+          git diff --exit-code swift/Sources/TaxiKit/Generated/MCPIntents.swift
+
+      - name: Verify golden-sample intents (RFC 0007 §3.6)
+        run: node scripts/verify-golden-intents.mjs
+
+      - name: Verify stats
+        run: node scripts/count-stats.mjs --check
+
+      - name: Verify llms.txt + llms-full.txt drift
+        run: npm run llms:check
+
+      - name: Verify tool description token budget
+        run: npm run tokens:check
+
+      - name: Verify version sync
+        run: node scripts/sync-version.mjs --check
+
+      - name: Verify i18n
+        run: node scripts/check-i18n.mjs
+
+      # Swift builds require Xcode toolchain (not CommandLineTools)
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Cache Swift build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            swift/.build
+            ios/.build
+          key: swift-${{ runner.os }}-${{ hashFiles('swift/Package.resolved', 'ios/Package.resolved') }}
+          restore-keys: |
+            swift-${{ runner.os }}-
+
+      - name: Swift — Build TaxiKit
+        run: cd swift && swift build
+
+      - name: Swift — Build Taxi menu bar app
+        run: cd app && swift build
+
+      - name: Swift — Test Taxi menu bar app
+        run: cd app && swift test
+
+      - name: Swift — Test Taxi widget
+        run: cd app/widget && swift test
+
+      - name: Swift — Test TaxiKit
+        run: cd swift && swift test
+
+      - name: Swift — Build TaxiServer (iOS)
+        run: cd ios && swift build
+
+      - name: Swift — Test TaxiServer
+        run: cd ios && swift test
+
+  # Glama builds every listed MCP server from a Dockerfile and runs the protocol
+  # introspection exchange inside a sandbox. If that build fails the listing stays
+  # up but distribution is withheld — the server drops out of search results,
+  # category listings, and recommendations until a reproducible build succeeds.
+  # That failure is invisible from this repo, so it is asserted here: the image
+  # has to build on Linux and the server has to boot, state its identity, and
+  # answer tools/list. This does NOT claim Taxi runs on Linux; tool calls need
+  # macOS and fail in the container by design.
+  registry-introspection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+
+      - name: Verify requested registry-introspection source
+        if: inputs.checkout_ref != ''
+        env:
+          REQUESTED_REF: ${{ inputs.checkout_ref }}
+        run: |
+          EXPECTED_SHA="$(git rev-parse "$REQUESTED_REF^{commit}")"
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Registry introspection checked out $ACTUAL_SHA instead of requested source $EXPECTED_SHA"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 22
+
+      - name: Build the registry-introspection image
+        run: docker build -t taxi-registry-introspection .
+
+      - name: Introspect the container the way an indexer does
+        run: npm run registry:verify

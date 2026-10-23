@@ -1,0 +1,231 @@
+// Drift guards for the tool-count / AppIntents-codegen contract.
+//
+// Why this file exists: the tool surface is described in FOUR places that
+// must agree but are generated/edited independently —
+//
+//   1. docs/tool-manifest.json          (SSOT, regenerated from tool defs)
+//   2. swift/.../Generated/MCPIntents.swift (codegen output)
+//   3. README.md                        (hand-edited prose)
+//   4. the live registry at runtime     (getToolCount())
+//
+// Nothing previously asserted these agree, so they drifted: README said
+// "272 tools" while the manifest had 285, and the 280-eligible-vs-232-
+// generated gap was undocumented. These are CONTRACT tests — they assert
+// the *relationships* that must hold, never a magic number, so they keep
+// passing as the catalog grows and fail the moment an artifact drifts.
+
+import { describe, test, expect, beforeAll } from "@jest/globals";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const MANIFEST = join(ROOT, "docs", "tool-manifest.json");
+const SWIFT = join(ROOT, "swift", "Sources", "TaxiKit", "Generated", "MCPIntents.swift");
+const README = join(ROOT, "README.md");
+const RATE_LIMIT = join(ROOT, "src", "shared", "rate-limit.ts");
+const OAUTH = join(ROOT, "src", "server", "oauth-verifier.ts");
+const WELL_KNOWN = join(ROOT, "src", "server", "well-known-card.ts");
+const MODULES = join(ROOT, "src", "shared", "modules.ts");
+// These tools operate on an explicitly granted MCP task context. In particular,
+// read_task_dashboard requires a sessionId grant; a generated standalone App
+// Intent cannot supply that authority. Keep the reviewed policy independent of
+// the generator so an accidental change to either side is detected.
+const APP_INTENT_SKIP_NAMES = new Set([
+  "start_tool_session",
+  "read_task_dashboard",
+  "tool_session_status",
+  "end_tool_session",
+]);
+
+let manifest;
+let swiftSrc;
+let readmeSrc;
+let rateLimitSrc;
+let oauthSrc;
+let wellKnownSrc;
+let modulesSrc;
+
+beforeAll(() => {
+  manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
+  swiftSrc = readFileSync(SWIFT, "utf8");
+  readmeSrc = readFileSync(README, "utf8");
+  rateLimitSrc = readFileSync(RATE_LIMIT, "utf8");
+  oauthSrc = readFileSync(OAUTH, "utf8");
+  wellKnownSrc = readFileSync(WELL_KNOWN, "utf8");
+  modulesSrc = readFileSync(MODULES, "utf8");
+});
+
+// Pull the integer that follows a "<phrase>" pattern out of README prose.
+function readmeNum(re) {
+  const m = readmeSrc.match(re);
+  expect(m).not.toBeNull();
+  return Number(m[1]);
+}
+
+describe("manifest internal consistency", () => {
+  test("toolCount equals the actual tools array length", () => {
+    expect(manifest.toolCount).toBe(manifest.tools.length);
+  });
+
+  test("eligibleCount + ineligibleCount partitions every tool", () => {
+    expect(manifest.eligibleCount + manifest.ineligibleCount).toBe(manifest.toolCount);
+  });
+
+  test("eligibleCount matches the count of appIntentEligible tools", () => {
+    const elig = manifest.tools.filter((t) => t.appIntentEligible).length;
+    expect(manifest.eligibleCount).toBe(elig);
+  });
+
+  test("ineligibleByReason sums to ineligibleCount", () => {
+    const sum = Object.values(manifest.ineligibleByReason ?? {}).reduce((a, b) => a + b, 0);
+    expect(sum).toBe(manifest.ineligibleCount);
+  });
+});
+
+describe("codegen drift: generated Swift intents vs manifest", () => {
+  test("generator skips exactly the reviewed MCP task-context tools", () => {
+    const generator = readFileSync(join(ROOT, "scripts", "gen-swift-intents.mjs"), "utf8");
+    const skipBlock = generator.match(/const SKIP_NAMES = new Set\(\[([\s\S]*?)\]\);/);
+    expect(skipBlock).not.toBeNull();
+    const generatorSkips = [...skipBlock[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    expect(generatorSkips.sort()).toEqual([...APP_INTENT_SKIP_NAMES].sort());
+  });
+
+  // The generator selects:
+  //   appIntentEligible
+  //   && !SKIP_NAMES.has(name)
+  //   && !(destructiveHint && !INCLUDE_DESTRUCTIVE)
+  // The committed artifact is built with destructive OFF (RFC 0007 §6
+  // default), so the generated set == eligible-minus-destructive-minus-skip.
+  test("one `: AppIntent` struct per selected eligible non-destructive tool", () => {
+    const predicted = manifest.tools.filter(
+      (t) =>
+        t.appIntentEligible && !APP_INTENT_SKIP_NAMES.has(t.name) && !(t.annotations && t.annotations.destructiveHint),
+    ).length;
+
+    const generated = (swiftSrc.match(/:\s*AppIntent\b/g) ?? []).length;
+
+    expect(generated).toBe(predicted);
+  });
+
+  test("no destructive intent leaked into the default (destructive-OFF) artifact", () => {
+    const generatedToolNames = new Set(
+      [...swiftSrc.matchAll(/MCPIntentRouter\.shared\.call\(\s*tool:\s*"([^"]+)"/g)].map((match) => match[1]),
+    );
+    const expectedToolNames = new Set(
+      manifest.tools
+        .filter(
+          (tool) =>
+            tool.appIntentEligible &&
+            !APP_INTENT_SKIP_NAMES.has(tool.name) &&
+            !(tool.annotations && tool.annotations.destructiveHint),
+        )
+        .map((tool) => tool.name),
+    );
+    const destructiveToolNames = new Set(
+      manifest.tools
+        .filter((tool) => tool.appIntentEligible && tool.annotations && tool.annotations.destructiveHint)
+        .map((tool) => tool.name),
+    );
+
+    // Exact membership catches substitutions that a count-only assertion misses.
+    expect([...generatedToolNames].sort()).toEqual([...expectedToolNames].sort());
+
+    // Keep this assertion non-vacuous and make the destructive boundary explicit.
+    expect(destructiveToolNames.size).toBeGreaterThan(0);
+    expect([...generatedToolNames].filter((name) => destructiveToolNames.has(name))).toEqual([]);
+  });
+});
+
+describe("doc drift: README prose vs manifest", () => {
+  test("README technical runtime section carries the manifest tool count", () => {
+    const runtimeSection = readmeSrc.split("## Runtime Model")[1]?.split("## Safety Model")[0] ?? "";
+    const runtimeCount = runtimeSection.match(/complete generated catalog currently contains (\d+) tools\b/);
+    expect(runtimeCount).not.toBeNull();
+    expect(Number(runtimeCount[1])).toBe(manifest.toolCount);
+  });
+
+  test('README "<N> modules" equals the module count in modules.ts', () => {
+    // modules.ts is "the single source of truth for all Taxi modules";
+    // each entry is `name: "<id>"`.
+    // Module entries are `{ name: "<id>", ... }`, often single-line, so the
+    // name: token is not anchored to line start. (Verified: all `name:` keys
+    // in this file are module ids — no other use.)
+    const modCount = (modulesSrc.match(/\bname:\s*"[a-z0-9_-]+"/g) ?? []).length;
+    expect(modCount).toBeGreaterThan(0);
+    expect(readmeNum(/(\d+)\s+modules\b/)).toBe(modCount);
+  });
+});
+
+describe("doc honesty: default surface vs full count, and the optional Swift bridge", () => {
+  // RFC 0014 root-cause: the "286 tools" headline is the --full / registered
+  // count, but a default `taxi run` loads the STARTER preset (~111), and
+  // the Swift binary is NOT in the npm tarball. These greppable invariants stop
+  // the README silently drifting back to advertising the full native surface as
+  // the out-of-box default.
+  test("README documents the starter-default vs --full distinction", () => {
+    expect(readmeSrc).toMatch(/\bstarter\b/i);
+    expect(readmeSrc).toMatch(/--full/);
+  });
+
+  test("README marks the Swift bridge as optional / not shipped in npm", () => {
+    // Wherever the native Swift bridge is presented as a capability, the README
+    // must also state it is optional and requires a build (npm run swift-build)
+    // or the .mcpb bundle — i.e. not shipped in the npm tarball.
+    expect(readmeSrc).toMatch(/optional/i);
+    expect(readmeSrc).toMatch(/npm run swift-build/);
+  });
+});
+
+describe("doc drift: README prose vs generated Swift artifact", () => {
+  test('README "<N> App Intent action types" equals generated `: AppIntent` structs', () => {
+    const generated = (swiftSrc.match(/:\s*AppIntent\b/g) ?? []).length;
+    expect(readmeNum(/(\d+)\s+App Intent action types\b/)).toBe(generated);
+  });
+
+  test('README "<N> Interactive Snippet views" equals generated SnippetView structs', () => {
+    const views = (swiftSrc.match(/^(?:public )?struct [A-Za-z0-9]+SnippetView/gm) ?? []).length;
+    expect(views).toBeGreaterThan(0);
+    expect(readmeNum(/(\d+)\s+Interactive Snippet views\b/)).toBe(views);
+  });
+
+  test('README "<N> AppEnum pickers" equals generated AppEnum types', () => {
+    const enums = (swiftSrc.match(/^public enum [A-Za-z0-9]+: String, AppEnum \{/gm) ?? []).length;
+    expect(enums).toBeGreaterThan(0);
+    expect(readmeNum(/(\d+)\s+AppEnum pickers\b/)).toBe(enums);
+  });
+});
+
+describe("doc drift: README prose vs infra source constants", () => {
+  test('README "<N>/min" rate equals DEFAULT_GLOBAL_PER_MINUTE', () => {
+    const m = rateLimitSrc.match(/DEFAULT_GLOBAL_PER_MINUTE\s*=\s*(\d+)/);
+    expect(m).not.toBeNull();
+    expect(readmeNum(/(\d+)\/min\b/)).toBe(Number(m[1]));
+  });
+
+  test('README "<N> destructive/hr" equals DEFAULT_DESTRUCTIVE_PER_HOUR', () => {
+    const m = rateLimitSrc.match(/DEFAULT_DESTRUCTIVE_PER_HOUR\s*=\s*(\d+)/);
+    expect(m).not.toBeNull();
+    expect(readmeNum(/(\d+)\s+destructive\/hr\b/)).toBe(Number(m[1]));
+  });
+
+  test("README JWT algs match oauth-verifier ALLOWED_ALGS", () => {
+    const m = oauthSrc.match(/ALLOWED_ALGS\s*=\s*\[([^\]]+)\]/);
+    expect(m).not.toBeNull();
+    const algs = m[1].match(/[A-Z0-9]+/g);
+    for (const alg of algs) {
+      expect(readmeSrc).toContain(alg); // README advertises every accepted alg
+    }
+    // ...and advertises no alg the verifier doesn't accept.
+    for (const alg of ["HS256", "none", "RS512", "ES384"]) {
+      if (!algs.includes(alg)) expect(readmeSrc).not.toContain(`${alg} JWT`);
+    }
+  });
+
+  test("README schema_version matches well-known-card SCHEMA_VERSION", () => {
+    const m = wellKnownSrc.match(/SCHEMA_VERSION\s*=\s*"([0-9-]+)"/);
+    expect(m).not.toBeNull();
+    expect(readmeSrc).toContain(m[1]);
+  });
+});

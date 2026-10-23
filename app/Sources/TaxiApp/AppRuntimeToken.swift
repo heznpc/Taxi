@@ -1,0 +1,394 @@
+import Darwin
+import CryptoKit
+import Foundation
+import Security
+
+enum AppRuntimeToken {
+    private static let directoryName = "Taxi"
+    private static let fileName = "http-token"
+    private static let ownerSecretFileName = "runtime-owner-secret"
+
+    static var tokenURL: URL {
+        if let override = ProcessInfo.processInfo.environment["TAXI_APP_RUNTIME_TOKEN_PATH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent(directoryName, isDirectory: true).appendingPathComponent(fileName)
+    }
+
+    /// A second, current-user credential distinguishes a runtime launched by
+    /// the native app from a manual process that happens to reuse its HTTP token.
+    /// The runtime never returns this secret; it returns only the domain-
+    /// separated SHA-256 fingerprint from its authenticated state endpoint.
+    static var ownerSecretURL: URL {
+        if let override = ProcessInfo.processInfo.environment["TAXI_APP_RUNTIME_OWNER_PATH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+        }
+        return tokenURL.deletingLastPathComponent().appendingPathComponent(ownerSecretFileName)
+    }
+
+    static func ensure() throws -> String {
+        let url = tokenURL
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        chmod(dir.path, S_IRWXU)
+
+        if let existing = try loadExisting() {
+            chmod(url.path, S_IRUSR | S_IWUSR)
+            return existing
+        }
+
+        let token = try randomToken()
+        if try writeTokenExclusively(token, to: url) {
+            return token
+        }
+
+        let raced = try readToken(at: url)
+        guard !raced.isEmpty else {
+            throw NSError(
+                domain: "TaxiAppRuntimeToken",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Taxi app runtime token exists but is empty."]
+            )
+        }
+        chmod(url.path, S_IRUSR | S_IWUSR)
+        return raced
+    }
+
+    /// Observational callers (readiness probes and Trust Center) must not
+    /// create credentials. Explicit runtime start / client connection paths
+    /// use `ensure()` instead.
+    static func loadExisting() throws -> String? {
+        let url = tokenURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let token = try readToken(at: url)
+        guard !token.isEmpty else {
+            throw NSError(
+                domain: "TaxiAppRuntimeToken",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Taxi app runtime token exists but is empty."]
+            )
+        }
+        return token
+    }
+
+    /// Create a fresh process-generation credential immediately before an
+    /// explicit app-owned launch. Atomic replacement preserves the previous
+    /// credential until the complete new owner-only inode is ready.
+    static func rotateOwnerSecret() throws -> String {
+        let url = ownerSecretURL
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        chmod(dir.path, S_IRWXU)
+        let secret = try randomToken()
+        try replaceSecretAtomically(secret, at: url)
+        return secret
+    }
+
+    /// Read-only ownership checks must not create a credential. This keeps a
+    /// status probe from silently granting the app lifecycle control over an
+    /// already-running process.
+    static func loadExistingOwnerSecret() throws -> String? {
+        let url = ownerSecretURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let secret = try readToken(at: url)
+        guard secret.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil else {
+            throw NSError(
+                domain: "TaxiAppRuntimeOwner",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Taxi runtime owner secret is invalid."]
+            )
+        }
+        return secret
+    }
+
+    static func ownerFingerprint(for secret: String) -> String {
+        let digest = SHA256.hash(data: Data("taxi-app-owner-v1\n\(secret)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Match the Node runtime's tokenless listener challenge. Binding the
+    /// proof to a caller nonce, process ID, and version prevents a process on
+    /// the reserved port from imitating the public health response and being
+    /// treated as the app-owned runtime.
+    static func listenerIdentityProof(
+        nonce: String,
+        processIdentifier: Int,
+        version: String,
+        ownerSecret: String
+    ) -> String? {
+        guard ownerSecret.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
+              nonce.range(of: #"^[A-Za-z0-9_-]{32,64}$"#, options: .regularExpression) != nil,
+              processIdentifier > 1,
+              !version.isEmpty
+        else { return nil }
+        let payload = Data(
+            "taxi-app-listener-v1\n\(nonce)\n\(processIdentifier)\n\(version)".utf8
+        )
+        let key = SymmetricKey(data: Data(ownerSecret.utf8))
+        let proof = HMAC<SHA256>.authenticationCode(for: payload, using: key)
+        return proof.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func listenerIdentityProofIsValid(
+        _ proof: String,
+        nonce: String,
+        processIdentifier: Int,
+        version: String,
+        ownerSecret: String
+    ) -> Bool {
+        guard ownerSecret.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
+              nonce.range(of: #"^[A-Za-z0-9_-]{32,64}$"#, options: .regularExpression) != nil,
+              processIdentifier > 1,
+              !version.isEmpty,
+              let proofData = dataFromLowercaseHex(proof)
+        else { return false }
+        let payload = Data(
+            "taxi-app-listener-v1\n\(nonce)\n\(processIdentifier)\n\(version)".utf8
+        )
+        let key = SymmetricKey(data: Data(ownerSecret.utf8))
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proofData,
+            authenticating: payload,
+            using: key
+        )
+    }
+
+    /// Authorization accepted only by the current app-owned runtime
+    /// generation. The owner secret is rotated before every child launch, so a
+    /// token intercepted after that listener exits cannot authenticate to its
+    /// replacement.
+    static func runtimeGenerationBearer(
+        processIdentifier: Int,
+        version: String,
+        ownerSecret: String
+    ) -> String? {
+        guard ownerSecret.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
+              processIdentifier > 1,
+              !version.isEmpty
+        else { return nil }
+        let payload = Data(
+            "taxi-app-generation-bearer-v1\n\(processIdentifier)\n\(version)".utf8
+        )
+        let key = SymmetricKey(data: Data(ownerSecret.utf8))
+        let proof = HMAC<SHA256>.authenticationCode(for: payload, using: key)
+        return "taxi_app_" + proof.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Validate the runtime-possession proof carried by each generation-authorized MCP
+    /// request. The request nonce makes a proof unusable on a later TCP
+    /// exchange, binding the response to the child that answered the listener
+    /// challenge even though Streamable HTTP opens separate connections.
+    static func runtimeResponseProofIsValid(
+        _ proof: String?,
+        nonce: String,
+        processIdentifier: Int,
+        version: String,
+        method: String,
+        path: String,
+        ownerSecret: String
+    ) -> Bool {
+        guard ownerSecret.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
+              nonce.range(of: #"^[A-Za-z0-9_-]{32,64}$"#, options: .regularExpression) != nil,
+              processIdentifier > 1,
+              !version.isEmpty,
+              method.range(of: #"^[A-Z]+$"#, options: .regularExpression) != nil,
+              (path == "/mcp" || path.range(of: #"^/app/harness(?:/(?:settings|usage|catalog|tasks(?:/[0-9a-f-]{36}/(?:handoff|run|links))?))?$"#, options: .regularExpression) != nil),
+              let proof,
+              let proofData = dataFromLowercaseHex(proof)
+        else { return false }
+        let payload = Data(
+            "taxi-app-response-v1\n\(nonce)\n\(processIdentifier)\n\(version)\n\(method)\n\(path)".utf8
+        )
+        let key = SymmetricKey(data: Data(ownerSecret.utf8))
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proofData,
+            authenticating: payload,
+            using: key
+        )
+    }
+
+    private static func dataFromLowercaseHex(_ value: String) -> Data? {
+        guard value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(value.count / 2)
+        var index = value.startIndex
+        while index < value.endIndex {
+            let next = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return Data(bytes)
+    }
+
+    static func expectedOwnerFingerprint() throws -> String? {
+        guard let secret = try loadExistingOwnerSecret() else { return nil }
+        return ownerFingerprint(for: secret)
+    }
+
+    static func fingerprint(for token: String) -> String {
+        let digest = SHA256.hash(data: Data("taxi-runtime-token-v1\n\(token)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Verify value continuity without creating or repairing a token file.
+    /// Client-patch transactions call this immediately before and after their
+    /// mutation so replacement/deletion fails closed and can be rolled back.
+    static func matchesExisting(_ expectedToken: String) -> Bool {
+        guard let current = try? loadExisting() else { return false }
+        return current == expectedToken
+    }
+
+    private static func readToken(at url: URL) throws -> String {
+        try String(contentsOf: url, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func randomToken() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw NSError(
+                domain: NSOSStatusErrorDomain,
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to generate Taxi app runtime token."]
+            )
+        }
+
+        return Data(bytes)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func writeTokenExclusively(_ token: String, to url: URL) throws -> Bool {
+        let temporaryURL = url.deletingLastPathComponent().appendingPathComponent(
+            ".\(url.lastPathComponent).\(UUID().uuidString).tmp"
+        )
+        let fd = open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        if fd == -1 {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to create Taxi app runtime token."]
+            )
+        }
+        defer { unlink(temporaryURL.path) }
+
+        let data = Data("\(token)\n".utf8)
+        var writeError: Int32?
+        data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let written = Darwin.write(
+                    fd,
+                    buffer.baseAddress?.advanced(by: offset),
+                    buffer.count - offset
+                )
+                if written > 0 {
+                    offset += written
+                } else if written == -1 && errno == EINTR {
+                    continue
+                } else {
+                    writeError = written == 0 ? EIO : errno
+                    break
+                }
+            }
+        }
+        if writeError == nil && fsync(fd) == -1 {
+            writeError = errno
+        }
+        let closeResult = close(fd)
+        if writeError == nil && closeResult == -1 {
+            writeError = errno
+        }
+        if let writeError {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(writeError),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to write Taxi app runtime token."]
+            )
+        }
+
+        // Publish only a fully written owner-only inode. A competing explicit
+        // start either installs its complete token or reads the winner; it can
+        // never observe an empty/partial destination.
+        if Darwin.link(temporaryURL.path, url.path) == -1 {
+            if errno == EEXIST { return false }
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to publish Taxi app runtime token."]
+            )
+        }
+        chmod(url.path, S_IRUSR | S_IWUSR)
+        return true
+    }
+
+    private static func replaceSecretAtomically(_ secret: String, at url: URL) throws {
+        let temporaryURL = url.deletingLastPathComponent().appendingPathComponent(
+            ".\(url.lastPathComponent).\(UUID().uuidString).tmp"
+        )
+        let fd = open(temporaryURL.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        if fd == -1 {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to create Taxi runtime owner secret."]
+            )
+        }
+        var fdIsOpen = true
+        defer {
+            if fdIsOpen { close(fd) }
+            unlink(temporaryURL.path)
+        }
+
+        let data = Data("\(secret)\n".utf8)
+        var writeError: Int32?
+        data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let written = Darwin.write(
+                    fd,
+                    buffer.baseAddress?.advanced(by: offset),
+                    buffer.count - offset
+                )
+                if written > 0 {
+                    offset += written
+                } else if written == -1 && errno == EINTR {
+                    continue
+                } else {
+                    writeError = written == 0 ? EIO : errno
+                    break
+                }
+            }
+        }
+        if writeError == nil && fsync(fd) == -1 { writeError = errno }
+        if close(fd) == -1, writeError == nil { writeError = errno }
+        fdIsOpen = false
+        if let writeError {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(writeError),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to write Taxi runtime owner secret."]
+            )
+        }
+        guard rename(temporaryURL.path, url.path) == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Failed to publish Taxi runtime owner secret."]
+            )
+        }
+        chmod(url.path, S_IRUSR | S_IWUSR)
+    }
+}

@@ -1,0 +1,201 @@
+import type { McpServer } from "../shared/mcp.js";
+import { z } from "zod";
+import { runJxa } from "../shared/jxa.js";
+import type { TaxiConfig } from "../shared/config.js";
+import { ok, okLinked, okUntrusted, errJxaFor, errUpstreamFor } from "../shared/result.js";
+import {
+  searchLocationScript,
+  getDirectionsScript,
+  dropPinScript,
+  openInMapsScript,
+  searchNearbyScript,
+  shareLocationScript,
+} from "./scripts.js";
+import { fetchGeocode, fetchReverseGeocode } from "./api.js";
+
+export function registerMapsTools(server: McpServer, _config: TaxiConfig): void {
+  server.registerTool(
+    "search_location",
+    {
+      title: "Search Location",
+      description: "Search for a place or location in Apple Maps.",
+      inputSchema: {
+        query: z.string().max(500).describe("Location or place to search for"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query }) => {
+      try {
+        return okLinked("search_maps", await runJxa(searchLocationScript(query)));
+      } catch (e) {
+        return errJxaFor("search location", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_directions",
+    {
+      title: "Get Directions",
+      description: "Get directions between two locations in Apple Maps.",
+      inputSchema: {
+        from: z.string().max(500).describe("Starting location or address"),
+        to: z.string().max(500).describe("Destination location or address"),
+        transportType: z
+          .enum(["driving", "walking", "transit"])
+          .optional()
+          .default("driving")
+          .describe("Mode of transport (default: driving)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ from, to, transportType }) => {
+      try {
+        return okUntrusted(await runJxa(getDirectionsScript(from, to, transportType)));
+      } catch (e) {
+        return errJxaFor("get directions", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "drop_pin",
+    {
+      title: "Drop Pin",
+      description: "Drop a pin at specific coordinates in Apple Maps.",
+      inputSchema: {
+        // Bare `z.number()` accepts ±Infinity (and any finite value) — JXA
+        // would receive the literal `Infinity` keyword and silently produce
+        // garbage map state. Match `reverse_geocode`'s bounds (line ~174)
+        // so every coordinate-shaped input across this module validates the
+        // same way; closes the consistency gap flagged in the 2026-05-13
+        // audit.
+        latitude: z.number().min(-90).max(90).describe("Latitude coordinate (degrees, -90 to 90)"),
+        longitude: z.number().min(-180).max(180).describe("Longitude coordinate (degrees, -180 to 180)"),
+        label: z.string().max(500).optional().describe("Optional label for the pin"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ latitude, longitude, label }) => {
+      try {
+        return ok(await runJxa(dropPinScript(latitude, longitude, label)));
+      } catch (e) {
+        return errJxaFor("drop pin", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "open_address",
+    {
+      title: "Open Address",
+      description: "Open a specific address in Apple Maps.",
+      inputSchema: {
+        address: z.string().max(500).describe("Address to open in Maps"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ address }) => {
+      try {
+        return ok(await runJxa(openInMapsScript(address)));
+      } catch (e) {
+        return errJxaFor("open address", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "search_nearby",
+    {
+      title: "Search Nearby",
+      description:
+        "Search for places near a location in Apple Maps. If no coordinates are given, searches near the current location.",
+      inputSchema: {
+        query: z.string().max(500).describe("What to search for (e.g. 'coffee shops', 'gas stations')"),
+        // Optional but still bounded — an undefined coordinate falls back to
+        // the device's current location; a finite-but-out-of-range one would
+        // silently produce nonsense.
+        latitude: z.number().min(-90).max(90).optional().describe("Latitude of the center point (degrees, -90 to 90)"),
+        longitude: z
+          .number()
+          .min(-180)
+          .max(180)
+          .optional()
+          .describe("Longitude of the center point (degrees, -180 to 180)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query, latitude, longitude }) => {
+      try {
+        return okUntrusted(await runJxa(searchNearbyScript(query, latitude, longitude)));
+      } catch (e) {
+        return errJxaFor("search nearby", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "share_location",
+    {
+      title: "Share Location",
+      description: "Generate a shareable Apple Maps link for a location.",
+      inputSchema: {
+        latitude: z.number().min(-90).max(90).describe("Latitude coordinate (degrees, -90 to 90)"),
+        longitude: z.number().min(-180).max(180).describe("Longitude coordinate (degrees, -180 to 180)"),
+        label: z.string().max(500).optional().describe("Optional label for the location"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ latitude, longitude, label }) => {
+      try {
+        return ok(await runJxa(shareLocationScript(latitude, longitude, label)));
+      } catch (e) {
+        return errJxaFor("share location", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "geocode",
+    {
+      title: "Geocode",
+      description:
+        "Convert a place name or address to geographic coordinates. Returns up to 5 matching locations with latitude, longitude, country, and timezone.",
+      inputSchema: {
+        query: z
+          .string()
+          .min(1)
+          .max(500)
+          .describe("Place name or address (e.g. 'Seoul', 'Tokyo Tower', '1600 Pennsylvania Ave')"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query }) => {
+      try {
+        return okUntrusted(await fetchGeocode(query));
+      } catch (e) {
+        return errUpstreamFor("geocode", e, { retryable: true });
+      }
+    },
+  );
+
+  server.registerTool(
+    "reverse_geocode",
+    {
+      title: "Reverse Geocode",
+      description: "Convert geographic coordinates to a place name and address.",
+      inputSchema: {
+        latitude: z.number().min(-90).max(90).describe("Latitude coordinate"),
+        longitude: z.number().min(-180).max(180).describe("Longitude coordinate"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ latitude, longitude }) => {
+      try {
+        return okUntrusted(await fetchReverseGeocode(latitude, longitude));
+      } catch (e) {
+        return errUpstreamFor("reverse geocode", e, { retryable: true });
+      }
+    },
+  );
+}

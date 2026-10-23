@@ -1,0 +1,296 @@
+/**
+ * audit_log / audit_summary end-to-end tests.
+ *
+ * Writes a handful of auditLog() entries, flushes to a tmp audit.jsonl,
+ * then calls the registered tools and checks the filter / aggregation
+ * behaviour. The fs is real — the handler reads the JSONL back through
+ * the same path as production — so anything that would break on a
+ * live machine (e.g. malformed line tolerance, since-filter math) is
+ * exercised here.
+ */
+import { describe, test, expect, beforeEach, afterEach, jest } from "@jest/globals";
+import { z } from "zod";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// Redirect PATHS.VECTOR_STORE (= audit dir) to a scratch dir BEFORE the
+// audit module is imported, so AUDIT_PATH lands in our tmp dir.
+const SCRATCH = mkdtempSync(join(tmpdir(), "taxi-audit-"));
+jest.unstable_mockModule("../dist/shared/constants.js", () => ({
+  PATHS: { VECTOR_STORE: SCRATCH, TEMP_DIR: tmpdir() },
+  AUDIT: {
+    FLUSH_INTERVAL: 30000,
+    MAX_ENTRY_SIZE: 8192,
+    // Keep in sync with the real AUDIT shape — omitting this made the spool
+    // bound compute Math.max(8192, undefined) = NaN in the module under test.
+    MAX_BUFFER_SIZE: 8 * 1024 * 1024,
+    MAX_FILE_SIZE: 10 * 1024 * 1024,
+    MAX_ARG_LENGTH: 500,
+    MAX_FLUSH_FAILURES: 3,
+  },
+  LIMITS: {},
+  TIMEOUT: {},
+  API: {},
+}));
+
+const { registerAuditTools } = await import("../dist/audit/tools.js");
+const { auditLog, _testFlush, _testReset } = await import("../dist/shared/audit.js");
+const { createMockServer } = await import("./helpers/mock-server.js");
+const { createMockConfig } = await import("./helpers/mock-config.js");
+
+function writeJsonl(file, entries) {
+  const path = join(SCRATCH, file);
+  mkdirSync(SCRATCH, { recursive: true });
+  writeFileSync(path, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+}
+
+beforeEach(() => {
+  _testReset();
+});
+
+afterEach(() => {
+  _testReset();
+  // Wipe the tmp dir between tests so state from one case doesn't leak.
+  try {
+    rmSync(SCRATCH, { recursive: true, force: true });
+    mkdirSync(SCRATCH, { recursive: true });
+  } catch {
+    // best-effort cleanup
+  }
+});
+
+describe("audit_log tool", () => {
+  test("returns entries filtered by time window", async () => {
+    const now = Date.now();
+    writeJsonl("audit.jsonl", [
+      { timestamp: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(), tool: "old_tool", status: "ok" },
+      { timestamp: new Date(now - 1 * 60 * 60 * 1000).toISOString(), tool: "new_tool", status: "ok" },
+    ]);
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_log", { limit: 10 });
+    expect(result.structuredContent.returned).toBe(1);
+    expect(result.structuredContent.entries[0].tool).toBe("new_tool");
+  });
+
+  test("filters by tool name", async () => {
+    const now = Date.now();
+    writeJsonl("audit.jsonl", [
+      { timestamp: new Date(now).toISOString(), tool: "a", status: "ok" },
+      { timestamp: new Date(now).toISOString(), tool: "b", status: "ok" },
+      { timestamp: new Date(now).toISOString(), tool: "a", status: "error" },
+    ]);
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_log", { tool: "a", limit: 10 });
+    expect(result.structuredContent.returned).toBe(2);
+    expect(result.structuredContent.entries.every((e) => e.tool === "a")).toBe(true);
+  });
+
+  test("filters by status", async () => {
+    const now = Date.now();
+    writeJsonl("audit.jsonl", [
+      { timestamp: new Date(now).toISOString(), tool: "x", status: "ok" },
+      { timestamp: new Date(now).toISOString(), tool: "x", status: "error" },
+    ]);
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_log", { status: "error", limit: 10 });
+    expect(result.structuredContent.returned).toBe(1);
+    expect(result.structuredContent.entries[0].status).toBe("error");
+  });
+
+  test("fails closed at a malformed line and excludes later rows", async () => {
+    const now = new Date().toISOString();
+    const validLine = JSON.stringify({ timestamp: now, tool: "t", status: "ok" });
+    writeFileSync(join(SCRATCH, "audit.jsonl"), `${validLine}\n{not json}\n${validLine}\n`);
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_log", { limit: 10 });
+    expect(result.structuredContent.returned).toBe(1);
+    expect(result.structuredContent.verified).toBe(false);
+    expect(result.structuredContent.firstBreak).toMatchObject({
+      file: "audit.jsonl",
+      lineIndex: 1,
+      reason: "malformed",
+    });
+  });
+
+  test("returns one normalized HMAC-backed history surface with approval evidence", async () => {
+    const correlationId = "corr-governed-loop";
+    const approvalId = "88888888-8888-4888-8888-888888888888";
+    auditLog({
+      approvalId,
+      timestamp: new Date().toISOString(),
+      kind: "approval",
+      tool: "create_reminder",
+      status: "error",
+      correlationId,
+      approvalDecision: "timed_out",
+      approvalChannel: "socket",
+    });
+    auditLog({
+      timestamp: new Date().toISOString(),
+      kind: "tool",
+      tool: "create_reminder",
+      status: "error",
+      correlationId,
+      errorCategory: "hitl_timeout",
+    });
+    await _testFlush();
+
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_log", { correlationId, limit: 10 });
+    const sc = result.structuredContent;
+
+    expect(sc.verified).toBe(true);
+    expect(sc.auditDisabled).toBe(false);
+    expect(sc.entries).toHaveLength(2);
+    expect(sc).not.toHaveProperty("history");
+    expect(sc.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "approval",
+          tool: "create_reminder",
+          correlationId,
+          approvalId,
+          approvalDecision: "timed_out",
+          approvalChannel: "socket",
+        }),
+        expect.objectContaining({
+          kind: "tool",
+          tool: "create_reminder",
+          correlationId,
+          status: "error",
+          errorCategory: "hitl_timeout",
+        }),
+      ]),
+    );
+    for (const row of sc.entries) {
+      expect(row).not.toHaveProperty("_hmac");
+      expect(row).not.toHaveProperty("_prev");
+      expect(row).not.toHaveProperty("seq");
+    }
+
+    const outputSchema = server._tools.get("audit_log").opts.outputSchema;
+    const parsed = z.object(outputSchema).strict().safeParse(sc);
+    if (!parsed.success) {
+      throw new Error(`audit_log structuredContent breaks its outputSchema:\n${parsed.error}`);
+    }
+  });
+
+  test("walks rotated files", async () => {
+    const now = Date.now();
+    writeJsonl("audit.jsonl", [{ timestamp: new Date(now).toISOString(), tool: "current", status: "ok" }]);
+    writeJsonl("audit.1700000000000.jsonl", [
+      { timestamp: new Date(now - 60_000).toISOString(), tool: "rotated", status: "ok" },
+    ]);
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_log", { limit: 10 });
+    expect(result.structuredContent.returned).toBe(2);
+    expect(result.structuredContent.scannedFiles).toBeGreaterThanOrEqual(2);
+    const tools = result.structuredContent.entries.map((e) => e.tool).sort();
+    expect(tools).toEqual(["current", "rotated"]);
+  });
+});
+
+describe("audit_summary tool", () => {
+  test("counts tool outcomes without double-counting separate approval events", async () => {
+    const now = new Date().toISOString();
+    auditLog({
+      timestamp: now,
+      kind: "approval",
+      tool: "memory_put",
+      status: "error",
+      approvalDecision: "denied",
+      approvalChannel: "socket",
+    });
+    auditLog({
+      timestamp: now,
+      kind: "tool",
+      tool: "memory_put",
+      status: "error",
+      errorCategory: "permission_denied",
+    });
+    await _testFlush();
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_summary", {});
+
+    expect(result.structuredContent.total).toBe(1);
+    expect(result.structuredContent.errors).toBe(1);
+    expect(result.structuredContent.topTools).toEqual([{ tool: "memory_put", count: 1, errors: 1 }]);
+  });
+
+  test("computes count / errorRate / topTools", async () => {
+    const now = new Date().toISOString();
+    auditLog({ timestamp: now, tool: "alpha", status: "ok" });
+    auditLog({ timestamp: now, tool: "alpha", status: "ok" });
+    auditLog({ timestamp: now, tool: "alpha", status: "error" });
+    auditLog({ timestamp: now, tool: "beta", status: "ok" });
+    await _testFlush();
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_summary", { topN: 5 });
+    const sc = result.structuredContent;
+    expect(sc.total).toBe(4);
+    expect(sc.errors).toBe(1);
+    expect(sc.errorRate).toBeCloseTo(0.25, 4);
+    expect(sc.topTools[0]).toEqual({ tool: "alpha", count: 3, errors: 1 });
+    expect(sc.topTools[1]).toEqual({ tool: "beta", count: 1, errors: 0 });
+    // Tamper-evidence surfaces in the summary for the sealed chain.
+    expect(sc.verified).toBe(true);
+    expect(sc.auditDisabled).toBe(false);
+  });
+
+  test("exposes tamper-evidence (verified) as part of the declared contract", async () => {
+    const now = new Date().toISOString();
+    auditLog({ timestamp: now, tool: "alpha", status: "ok" });
+    await _testFlush();
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_summary", {});
+
+    // The declared contract MUST carry `verified` — summarizeAuditEntries has
+    // always computed it, but before it was added to outputSchema the MCP SDK
+    // would strip it from structuredContent, hiding the strongest trust signal.
+    const outputSchema = server._tools.get("audit_summary").opts.outputSchema;
+    expect(Object.keys(outputSchema)).toContain("verified");
+
+    // structuredContent must conform EXACTLY (strict): every declared field
+    // present, no undeclared field the SDK would reject. This is the runtime
+    // contract — registration shape alone wouldn't catch a drift here.
+    const parsed = z.object(outputSchema).strict().safeParse(result.structuredContent);
+    if (!parsed.success) {
+      throw new Error(`audit_summary structuredContent breaks its outputSchema:\n${parsed.error}`);
+    }
+    expect(result.structuredContent.verified).toBe(true);
+  });
+
+  test("empty audit returns zeros without dividing by zero", async () => {
+    const server = createMockServer();
+    registerAuditTools(server, createMockConfig());
+    const result = await server.callTool("audit_summary", {});
+    expect(result.structuredContent.total).toBe(0);
+    expect(result.structuredContent.errors).toBe(0);
+    expect(result.structuredContent.errorRate).toBe(0);
+    expect(result.structuredContent.topTools).toEqual([]);
+  });
+});
+
+
+test("history window uses timestamp instants and preserves invocation evidence", async () => {
+  writeJsonl("audit.jsonl", [
+    { timestamp: "2026-09-09T10:00:00+09:00", tool: "read_file", status: "ok", invocationId: "inv-a", requestDigest: "sha256:v1:" + "a".repeat(64) },
+    { timestamp: "2026-09-09T02:00:00Z", tool: "read_file", status: "ok", invocationId: "inv-b" },
+    { timestamp: "2026-09-09T03:00:00Z", tool: "write_file", status: "ok" },
+  ]);
+  const server = createMockServer(); registerAuditTools(server, createMockConfig());
+  const result = await server.callTool("audit_log", { since: "2026-09-09T00:00:00Z", until: "2026-09-09T03:00:00Z", offset: 1, limit: 10 });
+  expect(result.structuredContent.total).toBe(2);
+  expect(result.structuredContent.entries).toHaveLength(1);
+  expect(result.structuredContent.entries[0]).toMatchObject({ invocationId: "inv-a", requestDigest: "sha256:v1:" + "a".repeat(64) });
+});

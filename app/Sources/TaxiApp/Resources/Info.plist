@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleAllowMixedLocalizations</key>
+    <true/>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>de</string>
+        <string>en</string>
+        <string>es</string>
+        <string>fr</string>
+        <string>ja</string>
+        <string>ko</string>
+        <string>pt-BR</string>
+        <string>zh-Hans</string>
+        <string>zh-Hant</string>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>app.taxi</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>taxi</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Taxi shows your calendar events in the Daily Briefing widget and enables AI-powered calendar management.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Taxi shows your reminders in the Daily Briefing widget and enables AI-powered reminder management.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Taxi transcribes audio files you explicitly provide, on-device, to return their text for your automation requests.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Taxi reads photos you ask it to list, search, classify, or export from your library.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Taxi adds a photo to your library only when you ask it to import an image.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Taxi reads and edits contacts you ask it to look up, create, or update.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Taxi reads your current location only when you explicitly ask for location-based tools.</string>
+    <key>NSHealthShareUsageDescription</key>
+    <string>Taxi reads aggregated HealthKit summaries only when you explicitly ask for health-related tools.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Taxi captures your screen or app windows only when you explicitly ask it to take a screenshot or screen recording.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Taxi controls other Mac apps only when you explicitly ask it to read or change their data.</string>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Taxi/Save to Notes</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>saveToNotes</string>
+            <key>NSPortName</key>
+            <string>TaxiApp</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSStringPboardType</string>
+            </array>
+            <key>NSRequiredContext</key>
+            <dict/>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Taxi/Create Reminder</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>createReminder</string>
+            <key>NSPortName</key>
+            <string>TaxiApp</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSStringPboardType</string>
+            </array>
+            <key>NSRequiredContext</key>
+            <dict/>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Taxi/Search</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>searchTaxi</string>
+            <key>NSPortName</key>
+            <string>TaxiApp</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSStringPboardType</string>
+            </array>
+            <key>NSRequiredContext</key>
+            <dict/>
+        </dict>
+    </array>
+</dict>
+</plist>

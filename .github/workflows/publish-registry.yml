@@ -1,0 +1,361 @@
+name: Publish Taxi to MCP Registry
+
+# This workflow creates Taxi's external MCP Registry identity. It is
+# intentionally manual and protected separately from npm/GitHub publication:
+# publishing a GitHub Release must never register this namespace implicitly.
+#
+# Dependency installation and release inspection run without OIDC. The final
+# job receives only the already-verified manifest and public release artifacts;
+# it is the sole job capable of requesting a Registry OIDC token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Already-published Taxi tag to register (for example v1.0.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: mcp-registry-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # Taxi and its canonical npm artifact are intentionally darwin-only. Running
+    # release:preflight on Linux would either fail the package `os` contract or
+    # require bypassing the exact install path that users receive.
+    runs-on: macos-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      release_sha: ${{ steps.publish-input.outputs.release_sha }}
+      server_sha256: ${{ steps.publish-input.outputs.server_sha256 }}
+    steps:
+      - name: Resolve exact registry release tag
+        id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$REQUESTED_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Registry tag must be canonical vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF" != "refs/tags/$REQUESTED_TAG" ]; then
+            echo "::error::Dispatch this workflow from refs/tags/$REQUESTED_TAG (got type=$GITHUB_REF_TYPE ref=$GITHUB_REF)"
+            exit 1
+          fi
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${REQUESTED_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 22
+
+      - name: Install checksum-pinned GitHub CLI
+        run: bash scripts/install-pinned-gh.sh
+
+      - name: Pin canonical npm pack implementation
+        run: |
+          npm install -g npm@12.0.2
+          test "$(npm --version)" = "12.0.2"
+
+      - name: Verify protected registry environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: >-
+          node scripts/verify-release-environment.mjs
+          --repo="${{ github.repository }}"
+          --tag="$RELEASE_TAG"
+          --environment=mcp-registry
+
+      - name: Verify registry manifest and published npm identity
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Checked-out source does not match $RELEASE_TAG"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$HEAD_SHA" origin/main; then
+            echo "::error::$RELEASE_TAG is not reachable from origin/main"
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const server = JSON.parse(readFileSync("server.json", "utf8"));
+          const version = process.env.VERSION;
+          if (pkg.name !== "@heznpc/taxi" || pkg.version !== version) throw new Error("package identity/version mismatch");
+          if (pkg.mcpName !== "io.github.heznpc/taxi") throw new Error("package MCP identity mismatch");
+          if (server.name !== pkg.mcpName || server.version !== version) throw new Error("server identity/version mismatch");
+          const npmPackage = server.packages?.find((entry) => entry.registryType === "npm");
+          if (npmPackage?.identifier !== pkg.name || npmPackage?.version !== version) {
+            throw new Error("server npm package identity/version mismatch");
+          }
+          NODE
+
+      - name: Install exact release dependencies
+        run: npm ci
+
+      - name: Rebuild canonical npm release artifact
+        env:
+          TAXI_RELEASE_SHA: ${{ github.sha }}
+        run: npm run release:preflight
+
+      - name: Verify exact published npm prerequisite
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          node scripts/verify-publish-identity.mjs \
+            --tarball="build/release-preflight/taxi-${VERSION}.tgz" \
+            --expected-sha="$RELEASE_SHA"
+
+      - name: Download exact public artifacts from immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          mkdir -p build/registry-release
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "Taxi-${VERSION}.zip" \
+            --dir build/registry-release
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "taxi-${VERSION}.mcpb" \
+            --dir build/registry-release
+
+      - name: Inspect exact public MCPB artifact
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          node scripts/verify-mcpb-artifact.mjs \
+            --path="build/registry-release/taxi-${VERSION}.mcpb"
+          npm run licenses:check -- \
+            --mcpb "build/registry-release/taxi-${VERSION}.mcpb"
+
+      - name: Verify immutable public release prerequisite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          npm run release:verify --
+          --skip-npx
+          --skip-root-install
+          --expected-sha="$RELEASE_SHA"
+          --tarball="build/release-preflight/taxi-${VERSION}.tgz"
+          --mcpb="build/registry-release/taxi-${VERSION}.mcpb"
+          --app-archive="build/registry-release/Taxi-${VERSION}.zip"
+
+      - name: Prepare exact Registry publish input
+        id: publish-input
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          INPUT_DIR=build/registry-publish-input
+          mkdir -p "$INPUT_DIR"
+          cp server.json "$INPUT_DIR/server.json"
+          cp scripts/install-pinned-gh.sh "$INPUT_DIR/install-pinned-gh.sh"
+          cp "build/registry-release/taxi-${VERSION}.mcpb" "$INPUT_DIR/taxi-${VERSION}.mcpb"
+          cp "build/registry-release/Taxi-${VERSION}.zip" "$INPUT_DIR/Taxi-${VERSION}.zip"
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          SERVER_SHA256="$(shasum -a 256 "$INPUT_DIR/server.json" | awk '{print $1}')"
+          INSTALLER_SHA256="$(shasum -a 256 "$INPUT_DIR/install-pinned-gh.sh" | awk '{print $1}')"
+          MCPB_SHA256="$(shasum -a 256 "$INPUT_DIR/taxi-${VERSION}.mcpb" | awk '{print $1}')"
+          APP_SHA256="$(shasum -a 256 "$INPUT_DIR/Taxi-${VERSION}.zip" | awk '{print $1}')"
+          export INPUT_DIR RELEASE_SHA SERVER_SHA256 INSTALLER_SHA256 MCPB_SHA256 APP_SHA256
+          node --input-type=module <<'NODE'
+          import { statSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+          const directory = process.env.INPUT_DIR;
+          const version = process.env.VERSION;
+          const evidence = {
+            schemaVersion: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            tag: process.env.RELEASE_TAG,
+            version,
+            releaseSha: process.env.RELEASE_SHA,
+            serverSha256: process.env.SERVER_SHA256,
+            installerSha256: process.env.INSTALLER_SHA256,
+            assets: [
+              {
+                name: `taxi-${version}.mcpb`,
+                sha256: process.env.MCPB_SHA256,
+                size: statSync(join(directory, `taxi-${version}.mcpb`)).size,
+              },
+              {
+                name: `Taxi-${version}.zip`,
+                sha256: process.env.APP_SHA256,
+                size: statSync(join(directory, `Taxi-${version}.zip`)).size,
+              },
+            ],
+          };
+          writeFileSync(join(directory, "registry-publish-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`, {
+            mode: 0o600,
+          });
+          NODE
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "server_sha256=$SERVER_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified Registry publish input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: taxi-registry-publish-${{ github.run_id }}
+          path: build/registry-publish-input
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: verify
+    runs-on: macos-latest
+    environment: mcp-registry
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Download verified Registry publish input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: taxi-registry-publish-${{ github.run_id }}
+          path: build/registry-publish-input
+
+      - name: Validate transferred Registry evidence
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_TAG: ${{ needs.verify.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.verify.outputs.version }}
+          EXPECTED_RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          EXPECTED_SERVER_SHA256: ${{ needs.verify.outputs.server_sha256 }}
+        run: |
+          set -euo pipefail
+          cd build/registry-publish-input
+          export EVIDENCE_PATH="$PWD/registry-publish-evidence.json"
+          export SERVER_PATH="$PWD/server.json"
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync, statSync } from "node:fs";
+          import { join } from "node:path";
+          const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+          const evidence = JSON.parse(readFileSync(process.env.EVIDENCE_PATH, "utf8"));
+          const exact = (actual, expected, label) => {
+            if (actual !== expected) throw new Error(`${label} mismatch`);
+          };
+          exact(evidence.schemaVersion, 1, "evidence schema");
+          exact(evidence.repository, process.env.EXPECTED_REPOSITORY, "repository");
+          exact(evidence.tag, process.env.EXPECTED_TAG, "tag");
+          exact(evidence.version, process.env.EXPECTED_VERSION, "version");
+          exact(evidence.releaseSha, process.env.EXPECTED_RELEASE_SHA, "release SHA");
+          exact(evidence.serverSha256, process.env.EXPECTED_SERVER_SHA256, "server output SHA");
+          exact(hash(process.env.SERVER_PATH), evidence.serverSha256, "server bytes");
+          exact(hash(join(process.cwd(), "install-pinned-gh.sh")), evidence.installerSha256, "GitHub CLI installer");
+          const expectedNames = [`Taxi-${evidence.version}.zip`, `taxi-${evidence.version}.mcpb`].sort();
+          const assets = Array.isArray(evidence.assets) ? evidence.assets : [];
+          exact(JSON.stringify(assets.map((asset) => asset.name).sort()), JSON.stringify(expectedNames), "asset set");
+          for (const asset of assets) {
+            const path = join(process.cwd(), asset.name);
+            exact(hash(path), asset.sha256, `${asset.name} bytes`);
+            exact(statSync(path).size, asset.size, `${asset.name} size`);
+          }
+          const server = JSON.parse(readFileSync(process.env.SERVER_PATH, "utf8"));
+          exact(server.name, "io.github.heznpc/taxi", "server identity");
+          exact(server.version, evidence.version, "server version");
+          NODE
+
+      - name: Install checksum-pinned GitHub CLI from verified input
+        run: bash build/registry-publish-input/install-pinned-gh.sh
+
+      - name: Re-verify immutable public release immediately before Registry login
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          REMOTE_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          if [ "$REMOTE_SHA" != "$RELEASE_SHA" ]; then
+            echo "::error::$RELEASE_TAG moved from $RELEASE_SHA to $REMOTE_SHA"
+            exit 1
+          fi
+          RELEASE_JSON="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isImmutable,assets)"
+          export RELEASE_JSON INPUT_DIR="$GITHUB_WORKSPACE/build/registry-publish-input"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const release = JSON.parse(process.env.RELEASE_JSON);
+          const evidence = JSON.parse(readFileSync(`${process.env.INPUT_DIR}/registry-publish-evidence.json`, "utf8"));
+          if (release.tagName !== evidence.tag) throw new Error("public release tag mismatch");
+          if (release.targetCommitish !== evidence.releaseSha) throw new Error("public release target mismatch");
+          if (release.isImmutable !== true) throw new Error("public release is not immutable");
+          const expected = Object.fromEntries(evidence.assets.map((asset) => [asset.name, asset.size]));
+          const actual = Object.fromEntries((release.assets ?? []).map((asset) => [asset.name, asset.size]));
+          if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(Object.keys(expected).sort())) {
+            throw new Error("public release asset set mismatch");
+          }
+          for (const [name, size] of Object.entries(expected)) {
+            if (actual[name] !== size) throw new Error(`public release ${name} size mismatch`);
+          }
+          NODE
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" \
+            "build/registry-publish-input/taxi-${VERSION}.mcpb" --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" \
+            "build/registry-publish-input/Taxi-${VERSION}.zip" --repo "$GITHUB_REPOSITORY"
+
+      - name: Install checksum-pinned mcp-publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_DARWIN_AMD64_SHA256: 88126981225e7714fcc6b7a10cdba4a80ae5901e9740a8c06d0d5195c8bc294c
+          MCP_PUBLISHER_DARWIN_ARM64_SHA256: e45e520892460732a4bdf37255576415d4a53ec171f8b913faf15bb1aef7cb77
+        run: |
+          case "$(uname -m)" in
+            x86_64)
+              ARCH=amd64
+              EXPECTED_SHA256="$MCP_PUBLISHER_DARWIN_AMD64_SHA256"
+              ;;
+            arm64)
+              ARCH=arm64
+              EXPECTED_SHA256="$MCP_PUBLISHER_DARWIN_ARM64_SHA256"
+              ;;
+            *)
+              echo "::error::Unsupported macOS runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          ARCHIVE="mcp-publisher_darwin_${ARCH}.tar.gz"
+          /usr/bin/curl --proto '=https' --tlsv1.2 -fsSLo "$ARCHIVE" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/$ARCHIVE"
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$ARCHIVE" | shasum -a 256 --check
+          tar -xzf "$ARCHIVE" mcp-publisher
+          rm -f "$ARCHIVE"
+          test -x ./mcp-publisher
+
+      - name: Authenticate to MCP Registry with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish exact server.json
+        run: ./mcp-publisher publish build/registry-publish-input/server.json

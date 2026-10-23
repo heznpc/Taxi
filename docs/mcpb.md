@@ -1,0 +1,88 @@
+# Build a local Claude Desktop bundle (`.mcpb`)
+
+Anthropic's [MCPB](https://github.com/modelcontextprotocol/mcpb) (MCP Bundle, also called "Desktop Extensions") packages an MCP server as a single drag-and-drop file. No `npm`, no editing `claude_desktop_config.json`, no shell.
+
+Taxi is a source preview. No downloadable MCPB release or npm package is published yet. Build the bundle locally using the commands below. It contains the standard JavaScript modules; runtime profiles decide what loads. The native Task Dashboard and Swift bridge are not included.
+
+## Install
+
+1. Build `build/mcpb/taxi-<version>.mcpb` locally with Node.js 22 or newer — see below.
+2. Open **Claude Desktop**.
+3. Drag the `.mcpb` onto the Claude Desktop window, or open **Settings → Extensions → Install from file…** and pick it.
+4. Click **Install**. Claude Desktop shows the extension's configuration form:
+
+   | Field | What it does |
+   |---|---|
+   | **Gemini API Key** (optional, sensitive) | Enables cloud embeddings for semantic tool search + note search. Leave blank to use Apple's on-device `NLContextualEmbedding` — no cloud calls are made without this key. |
+   | **Runtime profile** (default: starter) | Select `starter`, `communications-safe`, `productivity`, or `full`. The starter profile loads `notes`, `reminders`, `calendar`, `shortcuts`, `system`, `finder`, and `weather`. |
+   | **Tool exposure** (default: progressive) | `progressive` exposes a small front door; `profile` exposes the selected profile; `full` exposes every loaded tool. |
+   | **Load all 32 modules on startup** (default: off) | Compatibility toggle. When on, it overrides the profile and registers every standard module (contacts, mail, messages, music, safari, photos, Apple Intelligence, TV, maps, iWork, Google Workspace, health, bluetooth, etc.). Experimental opt-in modules such as `spatial_prep` remain disabled. |
+
+5. Claude Desktop launches Taxi the first time you open a conversation. macOS will prompt for Contacts / Calendar / Reminders / Notes permissions as they're first used — grant each.
+
+That's it. You can now say "Read my latest notes and summarize them" in any Claude Desktop chat.
+
+## Local bundle and source runtime
+
+| Path | Install | Updates | Config | Best for |
+|---|---|---|---|---|
+| **`.mcpb`** | Drag into Claude Desktop | Re-install newer `.mcpb` | UI form inside Claude Desktop | Local Claude Desktop testing. |
+| **`taxi setup`** | CLI wizard | Build the source checkout | `~/.config/taxi/config.json` | Developers. Anyone running stdio + HTTP simultaneously. CI scripts. |
+
+Both paths use the same underlying server — the `.mcpb` is literally `server/dist/` + `node_modules/` zipped with a manifest. Tools, permissions, audit log, rate limiter, and skills behave identically.
+
+## Runtime vs build-time gates
+
+- **Gemini API Key unset + no Swift bridge** → Taxi still works. Semantic tool search falls back to substring match; note search falls back to literal query. No cloud calls.
+- **Gemini API Key set + no Swift bridge** → Cloud path works. Swift-backed tools (EventKit, HealthKit, Vision, Foundation Models) will fail at call time with a clear "Swift bridge not available" message until the user runs `npm run swift-build` inside the extension bundle.
+- **Swift bridge pre-built** (future) — planned for a later release. Will ship a universal binary for `darwin-arm64` + `darwin-x64` inside the `.mcpb` so EventKit etc. work out of the box.
+
+## Build locally
+
+Developers can produce the bundle themselves:
+
+```sh
+npm ci
+npm run build
+npm run build:mcpb
+# → build/mcpb/taxi-<version>.mcpb
+```
+
+The build script (`scripts/build-mcpb.mjs`) runs `npm install --omit=dev --ignore-scripts` inside the bundle so it's fully self-contained — Claude Desktop never runs `npm` at install time.
+
+## Verify the manifest
+
+```sh
+npm run build:mcpb:check
+```
+
+Builds the exact self-contained bundle, validates `mcpb/manifest.template.json` substitutions and MCPB v0.3 shape, extracts the archive, and boots its embedded server in `full/full` mode while checking representative cross-pack tools. CI runs this on every push (see `.github/workflows/ci.yml`).
+
+## Troubleshooting
+
+### "Extension failed to load — invalid manifest"
+
+Run `npm run build:mcpb:check` against the repo commit the bundle was built from. Mismatched Node `engines` between `package.json` and the manifest's `compatibility.runtimes.node` is the most common culprit. Manifest-shape tests and the extracted-artifact full-profile smoke guard both structure and runtime completeness.
+
+### "Tool X isn't visible in Claude"
+
+Taxi's tool list is dynamic (skills + dynamic shortcuts generate tools at runtime). Claude Desktop's MCPB installer reads `tools_generated: true` from the manifest and treats the server as having a runtime discovery model — the tool list populates after the first `tools/list` call. Open a conversation and ask Claude to "list Taxi tools" to force the call.
+
+### "I want a specific module off"
+
+For per-module disabling, selected module-pack activation, or experimental modules such as `spatial_prep`, drop the `.mcpb` path and use `taxi setup`, `taxi modules`, or environment variables instead (`~/.config/taxi/config.json` has a module selection block).
+
+### Bundle is large (>5 MB)
+
+The bundle size is dominated by `node_modules` (~93 production deps, ~4.5 MB). A slimmer `.mcpb` would require:
+- Bundling the server with `esbuild --bundle` before packaging (drops most transitive deps)
+- Dropping dev-only optionals from `package.json dependencies`
+
+Tracked as a future optimization; not blocking correctness.
+
+## Related
+
+- [MCPB spec v0.3](https://github.com/modelcontextprotocol/mcpb/blob/main/MANIFEST.md)
+- [Anthropic: Desktop Extensions announcement](https://www.anthropic.com/engineering/desktop-extensions)
+- [`scripts/build-mcpb.mjs`](../scripts/build-mcpb.mjs)
+- [`mcpb/manifest.template.json`](../mcpb/manifest.template.json)

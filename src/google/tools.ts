@@ -1,0 +1,532 @@
+/**
+ * Google Workspace module — wraps @googleworkspace/cli (gws) for
+ * Gmail, Drive, Sheets, Calendar, Docs, Tasks, People, and Chat.
+ *
+ * Requires: npm install -g @googleworkspace/cli && gws auth setup
+ */
+import type { McpServer } from "../shared/mcp.js";
+import { z } from "zod";
+import type { TaxiConfig } from "../shared/config.js";
+import { ok, okUntrusted, errInvalidInput, errPermission, errUpstream } from "../shared/result.js";
+import { runGws, checkGws } from "./gws.js";
+
+// ── Allowed services & methods for gws_raw ──────────────────────────
+const GWS_ALLOWED_SERVICES = new Set([
+  "gmail",
+  "drive",
+  "sheets",
+  "calendar",
+  "docs",
+  "slides",
+  "tasks",
+  "chat",
+  "forms",
+  "keep",
+  "people",
+]);
+
+// Destructive-method detection. Matched case-insensitively as a substring so that
+// compound Google API method names (e.g. gmail `batchDelete`, drive `emptyTrash`,
+// sheets `clear`) and case variants (`Delete`/`DELETE`) cannot slip past the
+// allowSendMail gate. This is a fail-closed guard: any method whose name contains a
+// destructive verb requires the TAXI_ALLOW_SEND_MAIL opt-in. Previously this was an
+// exact, case-sensitive blocklist of {delete,trash,remove,purge}, which let real
+// irreversible methods like `batchDelete` execute with the opt-in disabled.
+const GWS_DESTRUCTIVE_PATTERN = /delete|trash|remove|purge|clear|empty|destroy|erase|wipe/i;
+const GWS_ALLOWED_LIST = [...GWS_ALLOWED_SERVICES].join(", ");
+
+export function registerGoogleTools(server: McpServer, config: TaxiConfig): void {
+  const { allowSendMail } = config;
+  // ── Status ─────────────────────────────────────────────────────────
+
+  server.registerTool(
+    "gws_status",
+    {
+      title: "Google Workspace Status",
+      description: "Check if Google Workspace CLI (gws) is installed and authenticated.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => {
+      const error = await checkGws();
+      if (error) return errUpstream(error + "\nInstall: npm install -g @googleworkspace/cli && gws auth setup");
+      return ok({ available: true, message: "Google Workspace CLI is ready." });
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // GMAIL
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_gmail_list",
+    {
+      title: "List Gmail Messages",
+      description: "List recent Gmail messages. Supports query filters (e.g. 'from:alice is:unread').",
+      inputSchema: {
+        query: z
+          .string()
+          .max(1000)
+          .optional()
+          .describe("Gmail search query (e.g. 'is:unread', 'from:bob subject:report')"),
+        maxResults: z.number().int().min(1).max(100).optional().default(20).describe("Max messages to return"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query, maxResults }) => {
+      try {
+        const params: Record<string, unknown> = { userId: "me", maxResults };
+        if (query) params.q = query;
+        return okUntrusted(await runGws("gmail", "users.messages", "list", params));
+      } catch (e) {
+        return errUpstream(`Gmail list failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_gmail_read",
+    {
+      title: "Read Gmail Message",
+      description: "Read a Gmail message by ID. Returns subject, from, to, date, and body.",
+      inputSchema: {
+        messageId: z.string().min(1).max(500).describe("Gmail message ID"),
+        format: z.enum(["full", "metadata", "minimal"]).optional().default("full").describe("Response format"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ messageId, format }) => {
+      try {
+        return okUntrusted(await runGws("gmail", "users.messages", "get", { userId: "me", id: messageId, format }));
+      } catch (e) {
+        return errUpstream(`Gmail read failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_gmail_send",
+    {
+      title: "Send Gmail",
+      description: "Send an email via Gmail. Encodes the message in RFC 2822 format.",
+      inputSchema: {
+        to: z.string().min(1).max(500).describe("Recipient email address"),
+        subject: z.string().max(1000).describe("Email subject"),
+        body: z.string().max(50000).describe("Email body (plain text)"),
+        cc: z.string().max(1000).optional().describe("CC recipients (comma-separated)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ to, subject, body, cc }) => {
+      if (!allowSendMail)
+        return errPermission(
+          "Sending mail is disabled. Set TAXI_ALLOW_SEND_MAIL=true or allowSendMail in config.json.",
+        );
+      try {
+        // Sanitize header fields — strip CR/LF to prevent header injection
+        const safeTo = to.replace(/[\r\n]/g, "");
+        const safeSubject = subject.replace(/[\r\n]/g, "");
+        const safeCc = cc?.replace(/[\r\n]/g, "");
+
+        // Build RFC 2822 raw message
+        let raw = `To: ${safeTo}\nSubject: ${safeSubject}\nContent-Type: text/plain; charset=utf-8\n`;
+        if (safeCc) raw += `Cc: ${safeCc}\n`;
+        raw += `\n${body}`;
+        const encoded = Buffer.from(raw).toString("base64url");
+        return ok(await runGws("gmail", "users.messages", "send", { userId: "me" }, { raw: encoded }));
+      } catch (e) {
+        return errUpstream(`Gmail send failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // DRIVE
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_drive_list",
+    {
+      title: "List Drive Files",
+      description: "List files in Google Drive. Supports query filters.",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Drive search query (e.g. \"name contains 'report'\" or \"mimeType = 'application/pdf'\")"),
+        pageSize: z.number().int().min(1).max(100).optional().default(20).describe("Max files to return"),
+        orderBy: z.string().max(500).optional().describe("Sort order (e.g. 'modifiedTime desc', 'name')"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query, pageSize, orderBy }) => {
+      try {
+        const params: Record<string, unknown> = {
+          pageSize,
+          fields: "files(id,name,mimeType,modifiedTime,size,webViewLink),nextPageToken",
+        };
+        if (query) params.q = query;
+        if (orderBy) params.orderBy = orderBy;
+        return okUntrusted(await runGws("drive", "files", "list", params));
+      } catch (e) {
+        return errUpstream(`Drive list failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_drive_read",
+    {
+      title: "Read Drive File Metadata",
+      description: "Get metadata for a Google Drive file by ID.",
+      inputSchema: {
+        fileId: z.string().min(1).max(500).describe("Drive file ID"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ fileId }) => {
+      try {
+        return okUntrusted(
+          await runGws("drive", "files", "get", {
+            fileId,
+            fields: "id,name,mimeType,modifiedTime,size,webViewLink,owners,shared,description",
+          }),
+        );
+      } catch (e) {
+        return errUpstream(`Drive read failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_drive_search",
+    {
+      title: "Search Drive",
+      description: "Full-text search across Google Drive files by content or name.",
+      inputSchema: {
+        query: z.string().min(1).max(500).describe("Search text (searches file names and content)"),
+        maxResults: z.number().int().min(1).max(50).optional().default(10),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query, maxResults }) => {
+      try {
+        // Drive API query language: single quotes delimit string literals.
+        // Strip everything except alphanumeric, CJK, and whitespace to prevent injection.
+        // Single quotes are critical to remove as they delimit API query string literals.
+        const safeQuery = query.replace(/[^a-zA-Z0-9\u3131-\uD79D\u4E00-\u9FFF\s]/g, "").trim();
+        if (!safeQuery) return errInvalidInput("Search query contains no valid characters after sanitization.");
+        return okUntrusted(
+          await runGws("drive", "files", "list", {
+            q: `fullText contains '${safeQuery}'`,
+            pageSize: maxResults,
+            fields: "files(id,name,mimeType,modifiedTime,webViewLink),nextPageToken",
+          }),
+        );
+      } catch (e) {
+        return errUpstream(`Drive search failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // SHEETS
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_sheets_read",
+    {
+      title: "Read Google Sheet",
+      description: "Read cell values from a Google Sheets spreadsheet.",
+      inputSchema: {
+        spreadsheetId: z.string().min(1).max(500).describe("Spreadsheet ID (from URL)"),
+        range: z.string().max(1000).optional().default("Sheet1").describe("A1 range notation (e.g. 'Sheet1!A1:D10')"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ spreadsheetId, range }) => {
+      try {
+        return okUntrusted(await runGws("sheets", "spreadsheets.values", "get", { spreadsheetId, range }));
+      } catch (e) {
+        return errUpstream(`Sheets read failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_sheets_write",
+    {
+      title: "Write to Google Sheet",
+      description: "Write values to a Google Sheets range.",
+      inputSchema: {
+        spreadsheetId: z.string().min(1).max(500).describe("Spreadsheet ID"),
+        range: z.string().min(1).max(1000).describe("A1 range (e.g. 'Sheet1!A1:B2')"),
+        values: z.array(z.array(z.string())).min(1).describe("2D array of cell values [[row1col1, row1col2], ...]"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ spreadsheetId, range, values }) => {
+      try {
+        return ok(
+          await runGws(
+            "sheets",
+            "spreadsheets.values",
+            "update",
+            {
+              spreadsheetId,
+              range,
+              valueInputOption: "USER_ENTERED",
+            },
+            { values },
+          ),
+        );
+      } catch (e) {
+        return errUpstream(`Sheets write failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // GOOGLE CALENDAR
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_calendar_list",
+    {
+      title: "List Google Calendar Events",
+      description: "List upcoming events from Google Calendar.",
+      inputSchema: {
+        maxResults: z.number().int().min(1).max(100).optional().default(10),
+        query: z.string().max(500).optional().describe("Free-text search within events"),
+        timeMin: z.string().max(64).optional().describe("Start time (ISO 8601). Defaults to now."),
+        timeMax: z.string().max(64).optional().describe("End time (ISO 8601)"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ maxResults, query, timeMin, timeMax }) => {
+      try {
+        const params: Record<string, unknown> = {
+          calendarId: "primary",
+          maxResults,
+          singleEvents: true,
+          orderBy: "startTime",
+          timeMin: timeMin || new Date().toISOString(),
+        };
+        if (query) params.q = query;
+        if (timeMax) params.timeMax = timeMax;
+        return okUntrusted(await runGws("calendar", "events", "list", params));
+      } catch (e) {
+        return errUpstream(`Calendar list failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_calendar_create",
+    {
+      title: "Create Google Calendar Event",
+      description: "Create an event in Google Calendar.",
+      inputSchema: {
+        summary: z.string().min(1).max(500).describe("Event title"),
+        start: z.string().min(1).max(64).describe("Start time (ISO 8601)"),
+        end: z.string().min(1).max(64).describe("End time (ISO 8601)"),
+        description: z.string().max(5000).optional().describe("Event description"),
+        location: z.string().max(5000).optional().describe("Event location"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ summary, start, end, description, location }) => {
+      try {
+        const body: Record<string, unknown> = {
+          summary,
+          start: { dateTime: start },
+          end: { dateTime: end },
+        };
+        if (description) body.description = description;
+        if (location) body.location = location;
+        return ok(await runGws("calendar", "events", "insert", { calendarId: "primary" }, body));
+      } catch (e) {
+        return errUpstream(`Calendar create failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // DOCS
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_docs_read",
+    {
+      title: "Read Google Doc",
+      description: "Read the content of a Google Doc by document ID.",
+      inputSchema: {
+        documentId: z.string().min(1).max(500).describe("Google Docs document ID"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ documentId }) => {
+      try {
+        return okUntrusted(await runGws("docs", "documents", "get", { documentId }));
+      } catch (e) {
+        return errUpstream(`Docs read failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // TASKS
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_tasks_list",
+    {
+      title: "List Google Tasks",
+      description: "List tasks from Google Tasks (default task list).",
+      inputSchema: {
+        maxResults: z.number().int().min(1).max(100).optional().default(20),
+        showCompleted: z.boolean().optional().default(false).describe("Include completed tasks"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ maxResults, showCompleted }) => {
+      try {
+        // Get default task list first
+        const lists = await runGws<{ items?: Array<{ id: string }> }>("tasks", "tasklists", "list", { maxResults: 1 });
+        const listId = lists.items?.[0]?.id || "@default";
+        return okUntrusted(await runGws("tasks", "tasks", "list", { tasklist: listId, maxResults, showCompleted }));
+      } catch (e) {
+        return errUpstream(`Tasks list failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "gws_tasks_create",
+    {
+      title: "Create Google Task",
+      description: "Create a task in Google Tasks.",
+      inputSchema: {
+        title: z.string().min(1).max(500).describe("Task title"),
+        notes: z.string().max(5000).optional().describe("Task notes/description"),
+        due: z.string().max(64).optional().describe("Due date (ISO 8601 or YYYY-MM-DD)"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ title, notes, due }) => {
+      try {
+        const lists = await runGws<{ items?: Array<{ id: string }> }>("tasks", "tasklists", "list", { maxResults: 1 });
+        const listId = lists.items?.[0]?.id || "@default";
+        const body: Record<string, unknown> = { title };
+        if (notes) body.notes = notes;
+        if (due) body.due = due.includes("T") ? due : `${due}T00:00:00.000Z`;
+        return ok(await runGws("tasks", "tasks", "insert", { tasklist: listId }, body));
+      } catch (e) {
+        return errUpstream(`Tasks create failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // PEOPLE (Contacts)
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_people_search",
+    {
+      title: "Search Google Contacts",
+      description: "Search contacts in Google People/Contacts.",
+      inputSchema: {
+        query: z.string().min(1).max(500).describe("Search query (name, email, phone)"),
+        pageSize: z.number().int().min(1).max(30).optional().default(10),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ query, pageSize }) => {
+      try {
+        return okUntrusted(
+          await runGws("people", "people", "searchContacts", {
+            query,
+            pageSize,
+            readMask: "names,emailAddresses,phoneNumbers,organizations",
+          }),
+        );
+      } catch (e) {
+        return errUpstream(`People search failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+
+  // ══════════════════════════════════════════════════════════════════
+  // GENERIC (any gws command)
+  // ══════════════════════════════════════════════════════════════════
+
+  server.registerTool(
+    "gws_raw",
+    {
+      title: "Raw GWS Command",
+      description:
+        "Execute any Google Workspace CLI command. For advanced use when specific tools don't cover your need.",
+      inputSchema: {
+        service: z.string().min(1).max(64).describe(`Service name. Allowed: ${GWS_ALLOWED_LIST}`),
+        resource: z
+          .string()
+          .min(1)
+          .max(500)
+          // Must start alphanumeric, then only [A-Za-z0-9._]. Blocks a leading '-'
+          // (or any flag-shaped value) from being parsed as an option by the gws
+          // CLI when forwarded as a positional arg (CWE-88 argument injection).
+          .regex(
+            /^[A-Za-z0-9][A-Za-z0-9._]*$/,
+            "resource must start alphanumeric and contain only letters, digits, '.', or '_'",
+          )
+          .describe("Resource (e.g. 'users.messages', 'files', 'spreadsheets.values')"),
+        method: z
+          .string()
+          .min(1)
+          .max(64)
+          .regex(/^[A-Za-z0-9]+$/, "method must be alphanumeric (no leading '-' / flags)")
+          .describe("Method (e.g. 'list', 'get', 'create', 'update', 'delete')"),
+        params: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .refine((v) => !v || JSON.stringify(v).length <= 10_000, "params must be under 10KB")
+          .describe("URL/query parameters as JSON"),
+        body: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .refine((v) => !v || JSON.stringify(v).length <= 100_000, "body must be under 100KB")
+          .describe("Request body as JSON"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ service, resource, method, params, body }) => {
+      // Service whitelist — reject unknown services
+      if (!GWS_ALLOWED_SERVICES.has(service)) {
+        return errInvalidInput(`Unknown service "${service}". Allowed: ${GWS_ALLOWED_LIST}`);
+      }
+
+      // Block destructive methods unless explicitly allowed
+      if (GWS_DESTRUCTIVE_PATTERN.test(method)) {
+        if (!allowSendMail) {
+          return errPermission(
+            `Destructive method "${method}" is disabled. Set TAXI_ALLOW_SEND_MAIL=true to enable delete/trash operations.`,
+          );
+        }
+      }
+
+      // "send" is not destructive but still requires opt-in (same gate as mail/messages)
+      if (service === "gmail" && method === "send") {
+        if (!allowSendMail) {
+          return errPermission("Gmail send is disabled. Set TAXI_ALLOW_SEND_MAIL=true.");
+        }
+      }
+
+      try {
+        return ok(await runGws(service, resource, method, params, body));
+      } catch (e) {
+        return errUpstream(`GWS command failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  );
+}

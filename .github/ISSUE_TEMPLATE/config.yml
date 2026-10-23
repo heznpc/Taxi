@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/heznpc/Taxi#readme
+    about: Check the README before opening an issue
+  - name: Diagnostics
+    url: https://github.com/heznpc/Taxi#troubleshooting
+    about: Run `node dist/index.js doctor` to diagnose common issues

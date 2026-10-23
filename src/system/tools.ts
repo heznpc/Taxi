@@ -1,0 +1,862 @@
+import type { McpServer } from "../shared/mcp.js";
+import { z } from "zod";
+import { runJxa } from "../shared/jxa.js";
+import { runAutomation } from "../shared/automation.js";
+import type { TaxiConfig } from "../shared/config.js";
+import { ok, okUntrustedStructured, okStructured, errJxaFor } from "../shared/result.js";
+import { zFilePath, resolveAndGuard } from "../shared/validate.js";
+import {
+  getClipboardScript,
+  setClipboardScript,
+  getVolumeScript,
+  setVolumeScript,
+  toggleDarkModeScript,
+  getFrontmostAppScript,
+  listRunningAppsScript,
+  getScreenInfoScript,
+  showNotificationScript,
+  captureScreenshotScript,
+  getWifiStatusScript,
+  toggleWifiScript,
+  listBluetoothDevicesScript,
+  getBatteryStatusScript,
+  getBrightnessScript,
+  setBrightnessScript,
+  toggleFocusModeScript,
+  systemSleepScript,
+  preventSleepScript,
+  systemPowerScript,
+  launchAppScript,
+  quitAppScript,
+  isAppRunningScript,
+  listAllWindowsScript,
+  moveWindowScript,
+  resizeWindowScript,
+  minimizeWindowScript,
+} from "./scripts.js";
+
+const caffeinatePids = new Set<number>();
+
+// Clean up ALL orphaned caffeinate processes on server exit
+process.on("exit", () => {
+  for (const pid of caffeinatePids) {
+    try {
+      process.kill(pid);
+    } catch {
+      /* already exited */
+    }
+  }
+  caffeinatePids.clear();
+});
+
+export function registerSystemTools(server: McpServer, _config: TaxiConfig): void {
+  server.registerTool(
+    "get_clipboard",
+    {
+      title: "Get Clipboard",
+      description: "Read the current text content of the system clipboard.",
+      inputSchema: {},
+      outputSchema: {
+        content: z.string(),
+        length: z.number(),
+        truncated: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okUntrustedStructured(
+          await runAutomation<{ content: string; length: number; truncated: boolean }>({
+            retrySafe: true,
+            swift: { command: "get-clipboard" },
+            jxa: () => getClipboardScript(),
+          }),
+        );
+      } catch (e) {
+        return errJxaFor("get clipboard", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_clipboard",
+    {
+      title: "Set Clipboard",
+      description: "Write text to the system clipboard, replacing its current content.",
+      inputSchema: {
+        text: z.string().max(10000).describe("Text to copy to the clipboard"),
+      },
+      outputSchema: {
+        set: z.boolean(),
+        length: z.number(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ text }) => {
+      try {
+        return okStructured(await runJxa<{ set: boolean; length: number }>(setClipboardScript(text)));
+      } catch (e) {
+        return errJxaFor("set clipboard", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_volume",
+    {
+      title: "Get Volume",
+      description: "Get the current system output volume level and mute state.",
+      inputSchema: {},
+      outputSchema: {
+        outputVolume: z.number(),
+        inputVolume: z.number(),
+        outputMuted: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okStructured(
+          await runJxa<{ outputVolume: number; inputVolume: number; outputMuted: boolean }>(getVolumeScript()),
+        );
+      } catch (e) {
+        return errJxaFor("get volume", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_volume",
+    {
+      title: "Set Volume",
+      description: "Set the system output volume (0-100) and/or mute state.",
+      inputSchema: {
+        volume: z.number().min(0).max(100).optional().describe("Output volume level (0-100)"),
+        muted: z.boolean().optional().describe("Whether to mute output audio"),
+      },
+      outputSchema: {
+        outputVolume: z.number(),
+        outputMuted: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ volume, muted }) => {
+      try {
+        return okStructured(
+          await runJxa<{ outputVolume: number; outputMuted: boolean }>(setVolumeScript(volume, muted)),
+        );
+      } catch (e) {
+        return errJxaFor("set volume", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "toggle_dark_mode",
+    {
+      title: "Toggle Dark Mode",
+      description: "Toggle macOS appearance between dark mode and light mode.",
+      inputSchema: {},
+      outputSchema: {
+        darkMode: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okStructured(await runJxa<{ darkMode: boolean }>(toggleDarkModeScript()));
+      } catch (e) {
+        return errJxaFor("toggle dark mode", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_frontmost_app",
+    {
+      title: "Get Frontmost App",
+      description: "Get the name, bundle identifier, and PID of the currently active (frontmost) application.",
+      inputSchema: {},
+      outputSchema: {
+        name: z.string(),
+        bundleIdentifier: z.string(),
+        pid: z.number(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okStructured(
+          await runJxa<{ name: string; bundleIdentifier: string; pid: number }>(getFrontmostAppScript()),
+        );
+      } catch (e) {
+        return errJxaFor("get frontmost app", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_running_apps",
+    {
+      title: "List Running Apps",
+      description: "List all running applications with name, bundle identifier, PID, and visibility.",
+      inputSchema: {},
+      outputSchema: {
+        total: z.number().int().min(0),
+        apps: z.array(
+          z.object({
+            name: z.string(),
+            bundleIdentifier: z.string(),
+            pid: z.number().int(),
+            visible: z.boolean(),
+          }),
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okUntrustedStructured(await runJxa(listRunningAppsScript()));
+      } catch (e) {
+        return errJxaFor("list running apps", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_screen_info",
+    {
+      title: "Get Screen Info",
+      description: "Get display information including resolution, pixel dimensions, and Retina status.",
+      inputSchema: {},
+      outputSchema: {
+        displays: z.array(
+          z.object({
+            name: z.string(),
+            resolution: z.string().nullable(),
+            pixelWidth: z.number().int().nullable(),
+            pixelHeight: z.number().int().nullable(),
+            retina: z.boolean(),
+          }),
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okStructured(await runJxa(getScreenInfoScript()));
+      } catch (e) {
+        return errJxaFor("get screen info", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "show_notification",
+    {
+      title: "Show Notification",
+      description: "Display a macOS system notification with optional title, subtitle, and sound.",
+      inputSchema: {
+        message: z.string().max(5000).describe("Notification body text"),
+        title: z.string().max(500).optional().describe("Notification title"),
+        subtitle: z.string().max(5000).optional().describe("Notification subtitle"),
+        sound: z.string().max(500).optional().describe("Sound name to play (e.g. 'Frog', 'Glass', 'Hero')"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ message, title, subtitle, sound }) => {
+      try {
+        return ok(await runJxa(showNotificationScript(message, title, subtitle, sound)));
+      } catch (e) {
+        return errJxaFor("show notification", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "capture_screenshot",
+    {
+      title: "Capture Screenshot",
+      description:
+        "Capture the screen to an image file at the given path — writes a file; needs macOS Screen Recording permission. Supports full screen, window, or selection capture.",
+      inputSchema: {
+        path: zFilePath.describe("Absolute file path to save the screenshot (e.g. '/tmp/screenshot.png')"),
+        region: z
+          .enum(["fullscreen", "window", "selection"])
+          .optional()
+          .default("fullscreen")
+          .describe("Capture region: fullscreen (default), window, or selection"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ path, region }) => {
+      try {
+        resolveAndGuard(path);
+        return ok(await runJxa(captureScreenshotScript(path, region)));
+      } catch (e) {
+        return errJxaFor("capture screenshot", e);
+      }
+    },
+  );
+
+  // --- Network & Display Control Tools ---
+
+  server.registerTool(
+    "get_wifi_status",
+    {
+      title: "Get WiFi Status",
+      description: "Get the current WiFi status including connected network name, signal strength, and channel.",
+      inputSchema: {},
+      outputSchema: {
+        ssid: z.string().nullable(),
+        bssid: z.string().nullable(),
+        signalStrength: z.number().int().nullable(),
+        noiseLevel: z.number().int().nullable(),
+        channel: z.string().nullable(),
+        connected: z.boolean(),
+        raw: z.string(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okUntrustedStructured(await runJxa(getWifiStatusScript()));
+      } catch (e) {
+        return errJxaFor("get wifi status", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "toggle_wifi",
+    {
+      title: "Toggle WiFi",
+      description: "Turn WiFi on or off.",
+      inputSchema: {
+        enable: z.boolean().describe("True to enable WiFi, false to disable"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ enable }) => {
+      try {
+        return ok(await runJxa(toggleWifiScript(enable)));
+      } catch (e) {
+        return errJxaFor("toggle wifi", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_bluetooth_devices",
+    {
+      title: "List Bluetooth Devices",
+      description: "List paired Bluetooth devices with their connection status.",
+      inputSchema: {},
+      outputSchema: {
+        total: z.number().int().min(0),
+        devices: z.array(
+          z.object({
+            name: z.string(),
+            connected: z.boolean(),
+            address: z.string().nullable(),
+            type: z.string().nullable(),
+          }),
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okUntrustedStructured(await runJxa(listBluetoothDevicesScript()));
+      } catch (e) {
+        return errJxaFor("list bluetooth devices", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_battery_status",
+    {
+      title: "Get Battery Status",
+      description: "Get battery percentage, charging state, power source, and estimated time remaining.",
+      inputSchema: {},
+      outputSchema: {
+        percentage: z.number().int().min(0).max(100).nullable(),
+        charging: z.boolean(),
+        source: z.string().nullable(),
+        timeRemaining: z.string().nullable(),
+        raw: z.string(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okStructured(await runJxa(getBatteryStatusScript()));
+      } catch (e) {
+        return errJxaFor("get battery status", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_brightness",
+    {
+      title: "Get Brightness",
+      description: "Get the current display brightness level.",
+      inputSchema: {},
+      outputSchema: {
+        brightness: z.number().min(0).max(1).nullable(),
+        raw: z.string(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okStructured(await runJxa(getBrightnessScript()));
+      } catch (e) {
+        return errJxaFor("get brightness", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_brightness",
+    {
+      title: "Set Brightness",
+      description: "Set the display brightness level. Requires the 'brightness' CLI tool (brew install brightness).",
+      inputSchema: {
+        level: z.number().min(0).max(1).describe("Brightness level from 0.0 (darkest) to 1.0 (brightest)"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ level }) => {
+      try {
+        return ok(await runJxa(setBrightnessScript(level)));
+      } catch (e) {
+        return errJxaFor("set brightness", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "toggle_focus_mode",
+    {
+      title: "Toggle Focus Mode",
+      description: "Toggle Do Not Disturb (Focus mode) on or off.",
+      inputSchema: {
+        enable: z.boolean().describe("True to enable Do Not Disturb, false to disable"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ enable }) => {
+      try {
+        return ok(await runJxa(toggleFocusModeScript(enable)));
+      } catch (e) {
+        return errJxaFor("toggle focus mode", e);
+      }
+    },
+  );
+
+  // --- Sleep & Power Management Tools ---
+
+  server.registerTool(
+    "system_sleep",
+    {
+      title: "System Sleep",
+      description: "Put the Mac to sleep.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return ok(await runJxa<{ action: string; success: boolean }>(systemSleepScript()));
+      } catch (e) {
+        return errJxaFor("system sleep", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "prevent_sleep",
+    {
+      title: "Prevent Sleep",
+      description:
+        "Prevent the Mac from sleeping for a specified duration using caffeinate. The assertion auto-releases when the timer elapses, or immediately via allow_sleep. Note: this also blocks sleep triggered by closing the lid, not just idle timeout — call allow_sleep first if you're about to close the lid.",
+      inputSchema: {
+        seconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(86400)
+          .optional()
+          .default(3600)
+          .describe("Duration in seconds (default: 3600 = 1 hour, max: 86400 = 24 hours)"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ seconds }) => {
+      try {
+        // Kill any previous caffeinate processes before starting a new one
+        for (const pid of caffeinatePids) {
+          try {
+            process.kill(pid);
+          } catch {
+            /* already exited */
+          }
+        }
+        caffeinatePids.clear();
+        const result = await runJxa<{ action: string; pid: number; seconds: number }>(preventSleepScript(seconds));
+        caffeinatePids.add(result.pid);
+        return ok(result);
+      } catch (e) {
+        return errJxaFor("prevent sleep", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "allow_sleep",
+    {
+      title: "Allow Sleep",
+      description:
+        "Cancel any active prevent_sleep assertion immediately, so the Mac can sleep normally again (idle timeout or closing the lid). No-op if no assertion is active.",
+      inputSchema: {},
+      outputSchema: {
+        cancelled: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const cancelled = caffeinatePids.size > 0;
+      for (const pid of caffeinatePids) {
+        try {
+          process.kill(pid);
+        } catch {
+          /* already exited */
+        }
+      }
+      caffeinatePids.clear();
+      return okStructured({ cancelled });
+    },
+  );
+
+  server.registerTool(
+    "system_power",
+    {
+      title: "System Power",
+      description: "Shutdown or restart the Mac. Use with caution.",
+      inputSchema: {
+        action: z.enum(["shutdown", "restart"]).describe("Power action: shutdown or restart"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ action }) => {
+      try {
+        return ok(await runJxa<{ action: string; success: boolean }>(systemPowerScript(action)));
+      } catch (e) {
+        return errJxaFor("system power", e);
+      }
+    },
+  );
+
+  // --- App Management Tools ---
+
+  server.registerTool(
+    "launch_app",
+    {
+      title: "Launch App",
+      description:
+        "Launch an application by name. Lightweight — just activates the app without reading its accessibility tree.",
+      inputSchema: {
+        name: z.string().min(1).max(500).describe("Application name (e.g. 'Safari', 'Xcode') or bundle ID"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ name }) => {
+      try {
+        return ok(await runJxa(launchAppScript(name)));
+      } catch (e) {
+        return errJxaFor("launch app", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "quit_app",
+    {
+      title: "Quit App",
+      description: "Quit a running application by name. May cause unsaved work to be lost.",
+      inputSchema: {
+        name: z.string().min(1).max(500).describe("Application name (e.g. 'Safari')"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ name }) => {
+      try {
+        return ok(await runJxa(quitAppScript(name)));
+      } catch (e) {
+        return errJxaFor("quit app", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "is_app_running",
+    {
+      title: "Is App Running",
+      description: "Check whether an application is currently running. Returns process details if found.",
+      inputSchema: {
+        name: z.string().min(1).max(500).describe("Application name to check (e.g. 'Safari')"),
+      },
+      outputSchema: {
+        running: z.boolean(),
+        name: z.string(),
+        // null when running === false. MCP SDK doesn't serialize z.optional()
+        // at the root of outputSchema — z.nullable() is the supported form for
+        // "may not be present" semantics; the script emits explicit nulls.
+        bundleIdentifier: z.string().nullable(),
+        pid: z.number().int().nullable(),
+        visible: z.boolean().nullable(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ name }) => {
+      try {
+        return okUntrustedStructured(await runJxa(isAppRunningScript(name)));
+      } catch (e) {
+        return errJxaFor("check app running", e);
+      }
+    },
+  );
+
+  // --- Window Management Tools ---
+
+  server.registerTool(
+    "list_all_windows",
+    {
+      title: "List All Windows",
+      description: "List windows across all running applications with title, size, position, app name, and PID.",
+      inputSchema: {},
+      outputSchema: {
+        total: z.number().int().min(0),
+        windows: z.array(
+          z.object({
+            app: z.string(),
+            pid: z.number().int(),
+            title: z.string(),
+            position: z.tuple([z.number(), z.number()]).nullable(),
+            size: z.tuple([z.number(), z.number()]).nullable(),
+            minimized: z.boolean(),
+          }),
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        sensitiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        return okUntrustedStructured(await runJxa(listAllWindowsScript()));
+      } catch (e) {
+        return errJxaFor("list all windows", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "move_window",
+    {
+      title: "Move Window",
+      description: "Move a window to a specific position on screen.",
+      inputSchema: {
+        appName: z.string().min(1).max(500).describe("Application name (e.g. 'Safari')"),
+        x: z.number().int().describe("X coordinate for top-left corner"),
+        y: z.number().int().describe("Y coordinate for top-left corner"),
+        windowTitle: z
+          .string()
+          .max(500)
+          .optional()
+          .describe("Specific window title. If omitted, targets the first window."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ appName, x, y, windowTitle }) => {
+      try {
+        return ok(await runJxa(moveWindowScript(appName, x, y, windowTitle)));
+      } catch (e) {
+        return errJxaFor("move window", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "resize_window",
+    {
+      title: "Resize Window",
+      description: "Resize a window to specific dimensions.",
+      inputSchema: {
+        appName: z.string().min(1).max(500).describe("Application name (e.g. 'Safari')"),
+        width: z.number().int().min(1).describe("Window width in pixels"),
+        height: z.number().int().min(1).describe("Window height in pixels"),
+        windowTitle: z
+          .string()
+          .max(500)
+          .optional()
+          .describe("Specific window title. If omitted, targets the first window."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ appName, width, height, windowTitle }) => {
+      try {
+        return ok(await runJxa(resizeWindowScript(appName, width, height, windowTitle)));
+      } catch (e) {
+        return errJxaFor("resize window", e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "minimize_window",
+    {
+      title: "Minimize Window",
+      description: "Minimize or restore a window.",
+      inputSchema: {
+        appName: z.string().min(1).max(500).describe("Application name (e.g. 'Safari')"),
+        restore: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Set true to restore (un-minimize) instead of minimizing"),
+        windowTitle: z
+          .string()
+          .max(500)
+          .optional()
+          .describe("Specific window title. If omitted, targets the first window."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ appName, restore, windowTitle }) => {
+      try {
+        return ok(await runJxa(minimizeWindowScript(appName, restore, windowTitle)));
+      } catch (e) {
+        return errJxaFor("minimize window", e);
+      }
+    },
+  );
+}

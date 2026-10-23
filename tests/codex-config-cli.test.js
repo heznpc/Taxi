@@ -1,0 +1,218 @@
+import { afterEach, describe, expect, test } from "@jest/globals";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { cleanBootEnv } from "../scripts/lib/clean-boot-env.mjs";
+
+const DIST = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+const homes = [];
+
+function runCli(home, args, cwd = home, env = {}) {
+  const childEnv = { ...cleanBootEnv(), HOME: home, NO_COLOR: "1", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+  delete childEnv.CODEX_HOME;
+  Object.assign(childEnv, env);
+  return spawnSync(process.execPath, [DIST, ...args], {
+    cwd,
+    env: childEnv,
+    encoding: "utf8",
+  });
+}
+
+function createHome() {
+  const home = mkdtempSync(join(tmpdir(), "taxi-codex-config-"));
+  homes.push(home);
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  return home;
+}
+
+afterEach(() => {
+  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+});
+
+describe("taxi codex", () => {
+  test("does not let an inherited CODEX_HOME escape the isolated test home", () => {
+    const home = createHome();
+    const configPath = join(home, ".codex", "config.toml");
+    const inheritedCodexHome = join(home, "inherited-codex-home");
+    const inheritedConfigPath = join(inheritedCodexHome, "config.toml");
+    mkdirSync(inheritedCodexHome, { recursive: true });
+    writeFileSync(configPath, '[mcp_servers.taxi]\ncommand = "npx"\n');
+    writeFileSync(inheritedConfigPath, 'model = "must-stay"\n');
+    const previousCodexHome = process.env.CODEX_HOME;
+
+    try {
+      process.env.CODEX_HOME = inheritedCodexHome;
+      const result = runCli(home, ["codex", "status", "--json"]);
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual(
+        expect.objectContaining({ globalState: "enabled", globalConfigPath: configPath }),
+      );
+      expect(readFileSync(inheritedConfigPath, "utf8")).toBe('model = "must-stay"\n');
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    }
+  });
+
+  test("an invalid Codex override does not block help or config-only init", () => {
+    const home = createHome();
+    const invalidOverride = join(home, "custom-codex.toml");
+
+    const help = runCli(home, ["codex", "--help"], home, {
+      TAXI_CODEX_CONFIG_PATH: invalidOverride,
+    });
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain("Usage: taxi codex");
+
+    const taxiConfigPath = join(home, ".config", "taxi", "config.json");
+    const initialized = runCli(home, ["setup", "--profile", "starter", "--yes"], home, {
+      TAXI_CODEX_CONFIG_PATH: invalidOverride,
+      TAXI_CONFIG_PATH: taxiConfigPath,
+    });
+    expect(initialized.status).toBe(0);
+    expect(initialized.stdout).toContain("clients=skipped");
+    expect(existsSync(taxiConfigPath)).toBe(true);
+    expect(existsSync(invalidOverride)).toBe(false);
+  });
+
+  test("canonicalizes a relative explicit config before reporting and toggling it", () => {
+    const home = createHome();
+    const relativeRoot = "relative-codex";
+    const configPath = join(realpathSync(home), relativeRoot, "config.toml");
+    mkdirSync(join(home, relativeRoot), { recursive: true });
+    writeFileSync(configPath, ["[mcp_servers.taxi]", "enabled = true", 'command = "npx"', ""].join("\n"));
+
+    const status = runCli(home, ["codex", "status", "--json"], home, {
+      TAXI_CODEX_CONFIG_PATH: join(relativeRoot, "config.toml"),
+    });
+    expect(status.status).toBe(0);
+    expect(JSON.parse(status.stdout)).toEqual(expect.objectContaining({ globalConfigPath: configPath }));
+
+    const disabled = runCli(home, ["codex", "disable", "--json"], home, {
+      TAXI_CODEX_CONFIG_PATH: join(relativeRoot, "config.toml"),
+    });
+    expect(disabled.status).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toContain("enabled = false");
+  });
+
+  test("fails closed before touching either file when an explicit filename cannot map to CODEX_HOME", () => {
+    const home = createHome();
+    const explicitPath = join(home, "custom-codex.toml");
+    const childCodexPath = join(home, "config.toml");
+    const explicitBefore = '[mcp_servers.taxi]\ncommand = "explicit-must-stay"\n';
+    const childBefore = '[mcp_servers.taxi]\ncommand = "child-must-stay"\n';
+    writeFileSync(explicitPath, explicitBefore);
+    writeFileSync(childCodexPath, childBefore);
+
+    const result = runCli(home, ["codex", "disable", "--json"], home, {
+      TAXI_CODEX_CONFIG_PATH: explicitPath,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("TAXI_CODEX_CONFIG_PATH must name config.toml");
+    expect(readFileSync(explicitPath, "utf8")).toBe(explicitBefore);
+    expect(readFileSync(childCodexPath, "utf8")).toBe(childBefore);
+  });
+
+  test("uses CODEX_HOME for status and toggles without touching the default user config", () => {
+    const home = createHome();
+    const codexHome = join(home, "isolated-codex");
+    const customConfigPath = join(codexHome, "config.toml");
+    const defaultConfigPath = join(home, ".codex", "config.toml");
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(defaultConfigPath, 'model = "default-must-stay"\n');
+    writeFileSync(
+      customConfigPath,
+      ["[mcp_servers.taxi]", "enabled = true", 'command = "npx"', 'args = ["-y", "taxi@2.16.0"]', ""].join("\n"),
+    );
+
+    const status = runCli(home, ["codex", "status", "--json"], home, { CODEX_HOME: codexHome });
+    expect(status.status).toBe(0);
+    expect(JSON.parse(status.stdout)).toEqual(
+      expect.objectContaining({ globalState: "enabled", globalConfigPath: customConfigPath }),
+    );
+
+    const disabled = runCli(home, ["codex", "disable", "--json"], home, { CODEX_HOME: codexHome });
+    expect(disabled.status).toBe(0);
+    expect(readFileSync(customConfigPath, "utf8")).toContain("enabled = false");
+
+    const enabled = runCli(home, ["codex", "enable", "--json"], home, { CODEX_HOME: codexHome });
+    expect(enabled.status).toBe(0);
+    expect(readFileSync(customConfigPath, "utf8")).toContain("enabled = true");
+    expect(readFileSync(defaultConfigPath, "utf8")).toBe('model = "default-must-stay"\n');
+  });
+
+  test("disables and re-enables the persistent entry without deleting its settings", () => {
+    const home = createHome();
+    const configPath = join(home, ".codex", "config.toml");
+    writeFileSync(
+      configPath,
+      [
+        'model = "gpt-5"',
+        "",
+        "[mcp_servers.taxi]",
+        'command = "npx"',
+        'args = ["-y", "taxi@2.16.0"]',
+        "",
+        "[mcp_servers.other]",
+        'command = "other"',
+        "",
+      ].join("\n"),
+    );
+
+    const disabled = runCli(home, ["codex", "disable", "--json"]);
+    expect(disabled.status).toBe(0);
+    expect(JSON.parse(disabled.stdout)).toEqual(
+      expect.objectContaining({ action: "disable", globalState: "disabled", changed: true }),
+    );
+    expect(readFileSync(configPath, "utf8")).toContain("enabled = false");
+    expect(readFileSync(configPath, "utf8")).toContain("[mcp_servers.other]");
+
+    const enabled = runCli(home, ["codex", "enable", "--json"]);
+    expect(enabled.status).toBe(0);
+    expect(JSON.parse(enabled.stdout)).toEqual(
+      expect.objectContaining({ action: "enable", globalState: "enabled", changed: true }),
+    );
+    expect(readFileSync(configPath, "utf8")).toContain("enabled = true");
+    expect(readFileSync(configPath, "utf8")).toContain('args = ["-y", "taxi@2.16.0"]');
+  });
+
+  test("reports project precedence and leaves the project-local override untouched", () => {
+    const home = createHome();
+    const project = join(home, "project");
+    const globalConfigPath = join(home, ".codex", "config.toml");
+    const projectConfigPath = join(project, ".codex", "config.toml");
+    mkdirSync(join(project, ".codex"), { recursive: true });
+    writeFileSync(globalConfigPath, ["[mcp_servers.taxi]", "enabled = true", 'command = "npx"', ""].join("\n"));
+    writeFileSync(projectConfigPath, ["[mcp_servers.taxi]", "enabled = true", 'command = "local"', ""].join("\n"));
+    const projectBefore = readFileSync(projectConfigPath, "utf8");
+
+    const result = runCli(home, ["codex", "disable", "--json"], project);
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(
+      expect.objectContaining({
+        globalState: "disabled",
+        projectOverride: { path: join(realpathSync(project), ".codex", "config.toml"), state: "enabled" },
+      }),
+    );
+    expect(readFileSync(projectConfigPath, "utf8")).toBe(projectBefore);
+  });
+
+  test("status reports an absent global registration without mutating config", () => {
+    const home = createHome();
+    const configPath = join(home, ".codex", "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5"\n');
+
+    const result = runCli(home, ["codex", "status", "--json"]);
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(
+      expect.objectContaining({ action: "status", globalState: "missing", globalConfigPath: configPath }),
+    );
+    expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5"\n');
+  });
+});

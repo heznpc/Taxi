@@ -1,0 +1,10 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "name": "Taxi",
+  "description": "A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences, and governed MCP access to Mac apps.",
+  "icon": "https://raw.githubusercontent.com/heznpc/Taxi/main/icons/taxi-icon-256.png",
+  "category": "automation",
+  "maintainers": [
+    "heznpc"
+  ]
+}

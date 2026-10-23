@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "taxi": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/Taxi/dist/index.js",
+        "run"
+      ],
+      "description": "A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences, and governed MCP access to Mac apps.",
+      "env": {}
+    }
+  },
+  "version": "1.0.0"
+}

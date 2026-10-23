@@ -1,0 +1,84 @@
+{
+  "$schema": "./schemas/product-identity.schema.json",
+  "product": "Taxi",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/heznpc/Taxi",
+    "status": "candidate-uncreated"
+  },
+  "npm": {
+    "package": "@heznpc/taxi",
+    "specifier": "@heznpc/taxi@1.0.0",
+    "status": "not-published-ownership-unverified",
+    "rejectedBareName": "taxi",
+    "rejectedBareNameReason": "Published package taxi@0.2.9 already exists."
+  },
+  "cli": {
+    "executable": "taxi",
+    "defaultCommand": "help",
+    "commands": [
+      "setup",
+      "run",
+      "connect",
+      "doctor",
+      "verify",
+      "modules",
+      "workflows",
+      "clients",
+      "codex"
+    ]
+  },
+  "mcp": {
+    "registrationKey": "taxi",
+    "registryId": "io.github.heznpc/taxi",
+    "registryStatus": "candidate-unregistered",
+    "resourceUriPrefix": "ui://taxi/"
+  },
+  "apple": {
+    "appName": "Taxi.app",
+    "executable": "Taxi",
+    "bundleId": "app.taxi",
+    "appGroup": "group.app.taxi",
+    "widgetBundleId": "app.taxi.Widget",
+    "urlScheme": "taxi",
+    "namespaceStatus": "candidate-unregistered"
+  },
+  "runtime": {
+    "httpPort": 3848,
+    "environmentPrefix": "TAXI_",
+    "httpHeaderPrefix": "x-taxi-",
+    "oauthRealm": "taxi",
+    "oauthResource": "https://taxi.invalid/mcp",
+    "oauthAudience": "https://taxi.invalid/mcp",
+    "webhookSignatureHeader": "x-taxi-signature",
+    "hmacDomains": {
+      "auditFallback": "taxi-audit::<hostname>::<platform>",
+      "auditCheckpoint": "taxi-audit-checkpoint-v1",
+      "runtimeListener": "taxi-app-listener-v1",
+      "runtimeGenerationBearer": "taxi-app-generation-bearer-v1",
+      "runtimeResponse": "taxi-app-response-v1",
+      "runtimeScope": "taxi-runtime-scope-v1",
+      "runtimeOwnerFingerprint": "taxi-app-owner-v1",
+      "runtimeTokenFingerprint": "taxi-runtime-token-v1"
+    }
+  },
+  "paths": {
+    "config": "~/.config/taxi/config.json",
+    "state": "~/.taxi",
+    "cache": "~/.cache/taxi",
+    "applicationSupport": "~/Library/Application Support/Taxi",
+    "runtimeToken": "~/Library/Application Support/Taxi/http-token",
+    "runtimeOwnerSecret": "~/Library/Application Support/Taxi/runtime-owner-secret",
+    "hitlSocket": "~/.taxi/hitl.sock",
+    "auditKey": "~/.taxi/audit-hmac.key",
+    "auditCheckpoint": "~/.taxi/audit.checkpoint",
+    "emergencyStop": "~/.taxi/emergency-stop"
+  },
+  "distribution": {
+    "pluginId": "taxi",
+    "pluginStatus": "candidate-unregistered",
+    "mcpbBaseName": "taxi",
+    "updaterRepository": "heznpc/Taxi",
+    "updaterStatus": "candidate-uncreated"
+  }
+}

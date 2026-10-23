@@ -1,0 +1,81 @@
+---
+title: Module Overview
+description: All 32 Taxi modules with tool counts and capabilities.
+---
+
+Taxi ships 32 modules that cover the Apple workspace. Each module registers a set of MCP tools that AI assistants can call. The full manifest contains 298 tools, while the default starter/progressive runtime exposes a smaller front door.
+
+Module packs are the activation boundary above modules. `taxi modules enable productivity` or `TAXI_MODULE_PACKS=core,productivity` keeps core workspace tools and iWork active while reporting unavailable profile modules through `profile_status.modulesMissingPacks`. npm and MCPB releases are universal and already contain every standard JavaScript module; profiles and progressive exposure narrow the active context without making users assemble the product from packages.
+
+The release gate boots clean-installed npm and MCPB artifacts in `full/full` mode and proves representative cross-pack tools are present. Taxi 1.0 does not discover or install external module packages.
+
+## Module Table
+
+| Module | Tools | Description |
+|--------|------:|-------------|
+| **Notes** | 12 | Full CRUD for Apple Notes. List, search, scan, create, update, delete notes and folders. |
+| **Reminders** | 11 | Full CRUD for Reminders. Create, complete, delete reminders and lists. Priority and due-date support. |
+| **Calendar** | 10 | Full CRUD for Calendar events. Today view, upcoming events, search, create, update, delete. |
+| **Contacts** | 10 | Full CRUD for Contacts. Search, create, update, delete contacts and groups. |
+| **Mail** | 11 | Read mailboxes, search messages, get unread count. Send and reply (when `allowSendMail` is enabled). |
+| **Messages** | 6 | List chats, read messages. Send iMessages (when `allowSendMessages` is enabled). |
+| **Music** | 17 | Full Apple Music control. Playlists, playback, search, queue management. |
+| **Finder** | 8 | File system operations. Search, list directories, recent files, create directories, trash files. |
+| **Safari** | 12 | Tab management, bookmarks, reading list. Open/close tabs, get page content, execute JavaScript. |
+| **System** | 28 | Clipboard, volume, brightness, dark mode, Wi-Fi, Bluetooth, battery, running apps, windows, notifications. |
+| **Photos** | 11 | Albums, search, favorites, photo info. Create albums, export photos. |
+| **Shortcuts** | 11 | List, search, run, create, delete, export, import, duplicate Siri Shortcuts. Plus dynamic per-shortcut tools. |
+| **Intelligence** | 13 | Apple Intelligence features (macOS 26+ only). Writing tools, image generation, summarization. |
+| **TV** | 6 | Apple TV app control. Playlists, playback, search. |
+| **UI** | 10 | UI automation via Accessibility APIs. Read UI trees, click elements, type text, inspect menus. |
+| **Screen** | 5 | Screen capture. List windows, capture screen/window/area. |
+| **Maps** | 8 | Geocoding, reverse geocoding, directions, share location, search places, drop pins. |
+| **Podcasts** | 6 | Podcast shows, episodes, playback control. |
+| **Weather** | 3 | Current weather, daily forecast, hourly forecast via Open-Meteo API. |
+| **Pages** | 7 | Apple Pages automation. List, create, read/write body text, close documents. |
+| **Numbers** | 12 | Apple Numbers automation. Spreadsheets, sheets, cell read/write. |
+| **Keynote** | 9 | Apple Keynote automation. Slides, presenter notes, add slides, PDF export, slideshow. |
+| **Location** | 2 | Location permission status, current location (via CoreLocation). |
+| **Bluetooth** | 4 | Bluetooth state, device discovery, connect/disconnect. |
+| **Google** | 16 | Google Workspace integration. Gmail, Google Calendar, Drive, Contacts, Tasks via GWS CLI. |
+| **Speech** | 3 | Speech recognition for local audio workflows: audio transcription, availability probe, smart clipboard. |
+| **Health** | 5 | HealthKit-backed summaries and samples through the optional Swift bridge. |
+| **Memory** | 4 | Local context memory for storing, querying, and summarizing reusable facts. |
+| **Audit** | 2 | Queryable audit summaries and raw audit log access. |
+| **Spatial Prep** | 3 | Experimental opt-in spatial preparation tools. |
+| **Webhooks** | 3 | Opt-in inbound webhook tools gated by the network policy. |
+| **Power Automate** | 1 | Opt-in inbound Power Automate bridge. |
+
+## Additional Tools
+
+Beyond the module tools, Taxi registers several cross-cutting tools:
+
+| Category | Tools | Description |
+|----------|------:|-------------|
+| **Cross-module** | 1 | `summarize_context` -- collects context from all enabled apps and produces a briefing via MCP Sampling. |
+| **Semantic** | 7 | Vector-based semantic search. Build, search, and manage on-device embedding indexes for notes and reminders. |
+| **Front door** | 12 | `profile_status`, `workflow_readiness`, module-pack tools, task sessions, dynamic discovery, and `run_tool`. |
+| **Workflow** | 1 | `get_workflow` -- retrieve prompt handlers as text for autonomous agent environments. Curated workflow readiness is exposed through `workflow_readiness`. |
+| **Skills** | - | Personal Skills Engine -- user-defined YAML-based workflows (not counted as tools). |
+
+## Prompts
+
+Modules marked with prompts support also register MCP prompt templates. These are pre-built workflows that AI assistants can invoke:
+
+| Module | Prompts |
+|--------|---------|
+| Notes | Note-taking workflows, research prompts |
+| Reminders | Task planning, GTD workflows |
+| Calendar | Daily briefing, scheduling prompts |
+| Shortcuts | Automation discovery, shortcut chaining |
+| Cross | `daily-briefing`, `dev-session`, multi-module orchestration |
+
+## Module Dependencies
+
+- **Intelligence** requires macOS 26 (Tahoe) or later.
+- **Google** requires the GWS CLI tool to be installed separately.
+- **Semantic search** requires either `GEMINI_API_KEY` for cloud embeddings or the Swift bridge for on-device embeddings.
+- **UI automation** requires Accessibility permissions for the host terminal/MCP client.
+- **Location** requires Location Services permission.
+- **Spatial** is an experimental opt-in bundled module pack, not part of the default profile.
+- All JXA-based modules (Notes, Reminders, Calendar, Contacts, Mail, Messages, Music, Safari, Photos, etc.) require Automation permissions.

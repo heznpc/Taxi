@@ -1,0 +1,96 @@
+{
+  "manifest_version": "0.3",
+  "name": "taxi",
+  "display_name": "Taxi",
+  "version": "{{VERSION}}",
+  "description": "{{DESCRIPTION}}",
+  "long_description": "A local workspace for coordinating AI sessions and tools. macOS source preview with task handoffs, model preferences, and governed MCP access to Mac apps. This build-from-source MCPB template packages Taxi's macOS MCP runtime, not the native Task Dashboard UI. The repository's native app records tasks and child-session handoffs, applies phase-specific model preferences, and observes provider evidence. Its current executor supports read-only Codex turns in a dedicated profile. Imported external sessions remain observation-only; external resume, general autonomous execution, and compression relay are not implemented.\n\nMac tools connect Notes, Reminders, Calendar, Mail, Finder, Shortcuts and other Apple apps. Sensitive actions use per-call HITL approval; audit logs, rate limits and an emergency stop govern execution. Swift-backed tools require a separately built Swift bridge. Optional cloud integrations make network requests when configured; local-first does not mean offline.\n\nSource preview: npm, Registry, MCPB release downloads and a signed app installer are not published as part of the source release. Build this bundle locally with Node.js 22 or newer. iOS/iPadOS is an experimental source target; visionOS and watchOS remain roadmap targets.",
+  "author": {
+    "name": "heznpc",
+    "url": "https://github.com/heznpc"
+  },
+  "homepage": "https://github.com/heznpc/Taxi",
+  "documentation": "https://github.com/heznpc/Taxi#readme",
+  "support": "https://github.com/heznpc/Taxi/issues",
+  "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/heznpc/Taxi.git"
+  },
+  "keywords": [
+    "mcp",
+    "apple",
+    "macos",
+    "notes",
+    "calendar",
+    "reminders",
+    "contacts",
+    "mail",
+    "siri",
+    "shortcuts",
+    "apple-intelligence"
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.11.0",
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "node": ">=22.0.0"
+    }
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/dist/index.js",
+        "run"
+      ],
+      "env": {
+        "GEMINI_API_KEY": "${user_config.gemini_api_key}",
+        "TAXI_FULL": "${user_config.load_all_modules}",
+        "TAXI_PROFILE": "${user_config.profile}",
+        "TAXI_TOOL_EXPOSURE": "${user_config.tool_exposure}"
+      }
+    }
+  },
+  "user_config": {
+    "gemini_api_key": {
+      "type": "string",
+      "title": "Gemini API Key (optional)",
+      "description": "Enables cloud embeddings for semantic tool search and note search. Taxi falls back to Apple's on-device NLContextualEmbedding when this is unset — no cloud calls are made without this key.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    },
+    "load_all_modules": {
+      "type": "boolean",
+      "title": "Load all 32 modules on startup",
+      "description": "Off by default — only the 7 starter modules load (notes, reminders, calendar, shortcuts, system, finder, weather) to keep the surface small. Turn on to register all standard modules (contacts, mail, messages, music, safari, photos, apple intelligence, TV, maps, iWork, Google Workspace, health, bluetooth, etc.). Experimental profile-only modules such as spatial_prep remain disabled. Per-module disable can still be done via TAXI_DISABLE_<MODULE> env vars in advanced setups.",
+      "required": false,
+      "default": false
+    },
+    "profile": {
+      "type": "string",
+      "title": "Runtime profile",
+      "description": "Module profile to load when Load all modules is off: starter, communications-safe, productivity, or full.",
+      "required": false,
+      "default": "starter"
+    },
+    "tool_exposure": {
+      "type": "string",
+      "title": "Tool exposure",
+      "description": "How many registered tools appear in tools/list: progressive keeps a small front door, profile exposes the selected profile, full exposes everything loaded.",
+      "required": false,
+      "default": "progressive"
+    }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "privacy_policies": [
+    "https://github.com/heznpc/Taxi/blob/main/docs/PRIVACY_POLICY.md"
+  ]
+}

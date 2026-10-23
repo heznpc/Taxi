@@ -1,0 +1,60 @@
+node_modules/
+dist/
+build/
+**/.build/
+*.tgz
+.DS_Store
+.idea/
+.swiftpm/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+.mcpregistry_*
+.smithery/
+TODO.md
+coverage/
+qa-sequential-report-*.md
+docs/site/node_modules/
+docs/site/dist/
+docs/site/.astro/
+Taxi.app
+
+# Binary / bundle
+*.mcpb
+
+# Runtime / temp
+*.log
+*.db
+*.sqlite
+*.bak
+*.tmp
+*.swp
+*~
+
+# Generated files (regenerate via scripts/)
+llms-full.txt
+
+# Build cache
+*.tsbuildinfo
+
+# Local env
+.env.local
+.vscode/
+
+# Claude Code local worktrees + project state (keep local) — but DO share the
+# repo review command, which is part of the RFC 0013 review process.
+.claude/*
+!.claude/commands/
+
+# Local design-rationale notes (not for publication)
+CLAUDE.md
+# Codex local agent config: the root AGENTS.md is the gitignored twin of
+# CLAUDE.md (the published agent guide lives at .github/AGENTS.md); .codex/ is
+# the Codex analog of .claude/* above. Not for publication.
+/AGENTS.md
+.codex/
+
+# Local-only agent state (internal strategy; never publish)
+docs/state.md
+
+# Immutable shared core artifact consumed by the app and npm bundle
+!vendor/heznpc-quota-core-*.tgz

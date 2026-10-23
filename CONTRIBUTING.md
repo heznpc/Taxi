@@ -1,0 +1,293 @@
+# Contributing to Taxi
+
+Thanks for your interest in contributing to Taxi! This guide covers everything you need to get started.
+
+## Development Setup
+
+```bash
+git clone https://github.com/heznpc/Taxi.git
+cd Taxi
+npm install
+npm run build
+```
+
+### Requirements
+
+- macOS (required — Apple app automation only works on macOS)
+- Node.js >= 20 (CI runs on Node 22 LTS; the floor will lift to Node 24 before Node 22 reaches end-of-life on 2027-04-30)
+- For Swift bridge features: macOS 26+ with Apple Silicon
+
+### Running Locally
+
+```bash
+# stdio mode (default)
+npm start
+
+# HTTP mode
+node dist/index.js --http --port 3848
+
+# Development with auto-reload
+npm run dev
+```
+
+## Branch Strategy
+
+- **`main`** is the production branch — always deployable
+- Create feature branches from `main`
+- All changes to `main` must go through a Pull Request
+- PRs require CI to pass before merging
+
+### Branch Naming
+
+```
+feat/short-description    # new feature
+fix/short-description     # bug fix
+docs/short-description    # documentation only
+refactor/short-description # code refactoring
+```
+
+## Making Changes
+
+### 1. Create a Branch
+
+```bash
+git checkout -b feat/my-feature
+```
+
+### 2. Write Code
+
+**Project structure** — each Apple app is a module under `src/`:
+
+```
+src/
+├── notes/          # tools.ts, scripts.ts, prompts.ts
+├── reminders/
+├── calendar/
+├── ...
+├── shared/         # esc.ts, config.ts, setup.ts, resources.ts
+└── index.ts        # server entry point
+```
+
+**Key patterns:**
+- `scripts.ts` — JXA script generators (pure functions returning strings)
+- `tools.ts` — MCP tool registrations (use `server.registerTool()`)
+- `prompts.ts` — MCP prompt registrations (use `server.prompt()`)
+- Always use `esc()` for JXA string interpolation and `escJxaShell()` for shell arguments inside JXA
+
+### 3. Validate
+
+```bash
+npm run lint       # ESLint
+npm run typecheck  # TypeScript type checking
+npm run build      # Full build
+npm test           # Jest tests
+```
+
+All four must pass — CI runs them automatically on every PR.
+
+Additional drift guards enforced by CI (run locally before touching docs or manifests):
+
+```bash
+npm run stats:check            # derived counts vs README + guarded docs
+npm run gen:manifest:check     # docs/tool-manifest.json reflects current src/
+npm run gen:intents:check      # Generated/MCPIntents.swift matches manifest
+npm run gen:app-catalog:check  # generated module/app catalog matches MODULE_MANIFEST
+```
+
+Auto-fix the corresponding generated sources with `npm run stats:sync`,
+`npm run gen:manifest`, `npm run gen:intents`, and
+`npm run gen:app-catalog`.
+
+### OAuth local development
+
+RFC 0005 OAuth 2.1 flow (HTTP mode with `with-oauth*` policy) needs an authorization server. `npm run dev:oauth` spins up a pinned Keycloak 26 devcontainer with a pre-seeded `taxi` realm (user `dev/dev`, scopes `mcp:read`/`mcp:write`/`mcp:destructive`/`mcp:admin`). Follow the banner: export `TAXI_OAUTH_ISSUER` + `TAXI_OAUTH_AUDIENCE`, mint a token with the printed curl snippet, then call `/.well-known/oauth-protected-resource` to verify discovery. Legacy Bearer (`TAXI_HTTP_TOKEN`) remains the recommended path for everyday local dev.
+
+### 4. Run QA Tests
+
+**Sequential QA (recommended)** — tests each module in isolation, one at a time. Starts a server with only one module enabled, runs its tools, kills the server, then moves to the next. Much lighter on system resources:
+
+```bash
+npm run qa:seq                             # test all modules sequentially
+node scripts/qa-sequential.mjs notes       # test a single module
+node scripts/qa-sequential.mjs notes calendar reminders  # test specific modules
+node scripts/qa-sequential.mjs --out       # save report to file
+```
+
+**Full smoke test** — loads all modules at once (resource-intensive):
+
+```bash
+npm run qa                         # run the read-only smoke suite
+node scripts/qa-test.mjs --out     # save to qa-report-<date>.md
+node scripts/qa-test.mjs --json    # machine-readable JSON output
+```
+
+**CRUD roundtrip test** — full create → read → update → read → delete cycles:
+
+```bash
+npm run qa:crud                              # run all CRUD modules
+node scripts/qa-crud-test.mjs --module notes # single module only
+node scripts/qa-crud-test.mjs --module notes,calendar  # multiple modules
+node scripts/qa-crud-test.mjs --dry-run      # preview test plan
+node scripts/qa-crud-test.mjs --out          # save report to file
+```
+
+CRUD tests create real data (notes, reminders, events, etc.) prefixed with `[Taxi-QA]`. Cleanup runs automatically even if a step fails. If cleanup fails, search for `[Taxi-QA]` in the relevant app and delete manually.
+
+Paste the output from both tests into your PR under the **QA Report** section.
+
+### 4a. Dev Test (Recommended During Development)
+
+For rapid iteration while coding, use the lightweight dev-test mode. It runs in-process with a MockMcpServer — no child processes, no stdio transport, 3x faster than QA scripts:
+
+```bash
+npm run dev:test -- notes                  # test one module
+npm run dev:test -- notes,calendar         # test specific modules
+npm run dev:test:changed                   # only git-changed modules
+npm run dev:test:watch -- notes            # watch mode (auto re-test on save)
+npm run dev:test -- --all                  # all modules, sequential
+npm run dev:test -- --tool list_notes      # test a single tool
+npm run dev:test -- --list                 # list available modules
+npm run dev:test -- --all --json           # JSON output for CI
+npm run dev:test -- --all --stop-on-fail   # stop at first failure
+```
+
+**When to use which:**
+
+| Stage | Command | Notes |
+|-------|---------|-------|
+| Active coding | `npm run dev:test` | Fast, in-process, git-aware |
+| Before PR | `npm run qa:seq` | Full validation in isolated servers |
+| CI / comprehensive | `npm run qa` + `npm run qa:crud` | Full coverage |
+
+**Status meanings:**
+
+| Status | Meaning |
+|--------|---------|
+| PASS | Tool returned expected data |
+| SKIP | Expected skip (app not running, macOS version, permissions, previous step failed) |
+| FAIL | Unexpected error — needs investigation |
+| WARN | Cleanup issue — test data may remain |
+
+### Adding a CRUD test for a new module
+
+Open `scripts/qa-crud-test.mjs` and add an entry to `CRUD_MODULES`:
+
+```javascript
+{
+  name: "MyModule",
+  steps: async function* (ctx) {
+    // CREATE — store the ID for later steps
+    yield {
+      action: "create",
+      tool: "create_thing",
+      args: { name: "[Taxi-QA] Test " + Date.now() },
+      validate: (r) => { ctx.set("id", r.id); return !!r.id; },
+    };
+    // READ — verify creation
+    yield {
+      action: "read",
+      tool: "list_things",
+      args: {},
+      validate: (r) => r.things?.some(t => t.id === ctx.get("id")),
+    };
+    // UPDATE
+    yield {
+      action: "update",
+      tool: "update_thing",
+      args: () => ({ id: ctx.get("id"), name: "[Taxi-QA] Updated" }),
+      validate: (r) => r.updated === true,
+    };
+    // DELETE (cleanup: true = always runs, even after failures)
+    yield {
+      action: "delete",
+      tool: "delete_thing",
+      args: () => ({ id: ctx.get("id") }),
+      cleanup: true,
+    };
+  },
+}
+```
+
+Key points:
+- Use `ctx.set(key, value)` / `ctx.get(key)` to pass data between steps
+- Use `args: () => ({...})` (function) when args depend on earlier steps
+- Mark the last step `cleanup: true` so it runs even if earlier steps fail
+- Always prefix test data with `[Taxi-QA]` for easy identification
+
+### 5. Commit
+
+Write clear, concise commit messages:
+
+```
+feat: add search_contacts tool
+fix: escape single quotes in JXA chat ID
+docs: update README tool count
+refactor: extract shared pagination logic
+```
+
+### 6. Open a Pull Request
+
+- Target the `main` branch
+- Fill in the PR template
+- Wait for CI to pass
+- Request a review if needed
+
+## Adding a New Tool
+
+1. Add the JXA script generator to `src/<module>/scripts.ts`
+2. Register the tool in `src/<module>/tools.ts` with proper safety annotations:
+   - `readOnlyHint: true` for read operations
+   - `destructiveHint: true` for delete/update operations
+3. Add tests for script generators in `tests/<module>-scripts.test.js`
+4. Run `npm run dev:test:changed` while iterating, then refresh and verify
+   generated surfaces with `npm run gen:manifest`, `npm run gen:intents`,
+   and `npm run stats:sync`; then run `npm run gen:manifest:check`,
+   `npm run gen:intents:check`, and `npm run stats:check` before opening a PR
+
+## Adding a New Module
+
+1. Create `src/<module>/scripts.ts` and `src/<module>/tools.ts`
+   - `tools.ts` must export a function named `register<Module>Tools(server, config)`
+2. Add one line to the `MODULE_MANIFEST` array in `src/shared/modules.ts` — no other imports needed
+3. Add prompts if applicable (`src/<module>/prompts.ts`, set `hasPrompts: true` in `MODULE_MANIFEST`)
+4. Add tests in `tests/<module>-scripts.test.js`
+5. Verify with `node scripts/qa-sequential.mjs <module>`
+6. Refresh the generated module/app surfaces with `npm run gen:app-catalog`,
+   `npm run gen:manifest`, `npm run gen:intents`, and `npm run stats:sync`;
+   then run `npm run gen:app-catalog:check`, `npm run gen:manifest:check`,
+   `npm run gen:intents:check`, and `npm run stats:check`
+
+`docs/index.html` is a curated public positioning page, not a routine
+count-sync target for `scripts/count-stats.mjs`. Change it only when the
+landing-page message itself changes; ordinary tool/module count drift should be
+handled by the generated guards above.
+
+## Code Style
+
+- TypeScript strict mode
+- ESLint enforced — run `npm run lint` before committing
+- No `any` types — use `unknown` and narrow
+- Prefer `const` over `let`
+- Use the shared `esc()` / `escJxaShell()` utilities — never inline string escaping
+
+## Security
+
+- **Never** interpolate user input directly into JXA scripts — always use `esc()` or `escJxaShell()`
+- Every tool must have `annotations` with `readOnlyHint` or `destructiveHint`
+- Destructive tools should validate input before executing
+
+## Review process
+
+Review is **routed by risk tier**, not spread evenly across the full tool surface
+— see **[RFC 0013 — Stratified review process](docs/rfc/0013-review-process.md)**.
+In short: the critical infra layer (`src/shared/` audit / HITL / OAuth / rate-limit
+/ registry, the transport, the codegen contract) is **T0** and gets max-effort
+review + a behaviour-asserting contract test per invariant; the agent-controls-the-
+Mac surface (`system`, `ui`) is **T1**; JXA-thin tool modules are **T2** (the drift
+tests are the floor). When opening or reviewing a PR, tag the touched tier so
+review depth matches the blast radius. RFC 0013 §2 lists the per-area failure
+modes to hunt.
+
+## Questions?
+
+Open an [issue](https://github.com/heznpc/Taxi/issues) for bugs, feature requests, or questions.

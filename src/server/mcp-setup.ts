@@ -1,0 +1,300 @@
+/**
+ * MCP server creation — module loading, tool/prompt/resource registration,
+ * and banner metadata collection.
+ */
+
+import { McpServer as SdkMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer as LightMcpServer } from "../shared/mcp.js";
+import { registerCrossPrompts } from "../cross/prompts.js";
+import { registerCrossTools } from "../cross/tools.js";
+import { registerSemanticTools } from "../semantic/tools.js";
+import { registerResources } from "../shared/resources.js";
+import { registerSetupTools } from "../shared/setup.js";
+import { registerSkillEngine } from "../skills/index.js";
+import type { SkillEngineLifecycle } from "../skills/index.js";
+import { log, errToCtx } from "../shared/logger.js";
+import { registerApps } from "../apps/tools.js";
+import { getCompatibilityEnv, isModuleEnabled, MODULE_NAMES, type TaxiConfig } from "../shared/config.js";
+import { IDENTITY } from "../shared/constants.js";
+import { getModulePackPlan, loadModuleRegistry, setModuleRegistry } from "../shared/modules.js";
+import { resolveModuleCompatibility } from "../shared/compatibility.js";
+import { registerDynamicShortcutTools } from "../shortcuts/tools.js";
+import { HitlClient } from "../shared/hitl.js";
+import { installHitlGuard } from "../shared/hitl-guard.js";
+import { createToolRegistry, type ToolRegistry } from "../shared/tool-registry.js";
+import { indexToolDescriptions, reuseToolDescriptionIndex } from "../shared/tool-search.js";
+import { isCompactMode } from "../shared/tool-filter.js";
+import { resolveHarnessAdapter } from "../shared/task-adapters.js";
+import { assessWorkflowsReadiness } from "../shared/workflows.js";
+import type { BannerInfo } from "../shared/banner.js";
+import { SERVER_ICON, SERVER_INSTRUCTIONS, WEBSITE_URL } from "../shared/icons.js";
+import { buildMissingPackActivationHints, registerFrontDoorTools } from "./front-door-tools.js";
+import { registerToolSessionTools } from "./tool-session-tools.js";
+import { registerTaskDashboardTool } from "../harness/tools.js";
+import { registerEventTools } from "./event-tools.js";
+import { installToolListSchemaDialectFix } from "./schema-dialect.js";
+
+export interface CreateServerOptions {
+  config: TaxiConfig;
+  hitlClient: HitlClient | null;
+  osVersion: number;
+  pkg: { version: string; description?: string; license?: string; homepage?: string };
+  /** HTTP warmup builds one process-wide semantic catalog. Per-session
+   * registries reuse that exact catalog instead of embedding it again. Stdio
+   * callers omit this field and retain the existing background-build path. */
+  semanticIndex?: { mode: "build" } | { mode: "reuse"; source: ToolRegistry } | { mode: "disabled" };
+  /** Exactly one server per runtime owns process-global skill triggers and the
+   * user-skill watcher. HTTP sessions are disposable and must select session. */
+  skillLifecycle?: SkillEngineLifecycle;
+}
+
+export interface RuntimeModuleUnavailable {
+  module: string;
+  reason: "module_pack" | "host_unavailable" | "known_broken" | "registration_failed";
+  detail?: string;
+}
+
+export interface RuntimeModuleState {
+  enabledModules: string[];
+  unavailableModules: RuntimeModuleUnavailable[];
+}
+
+export async function createServer(options: CreateServerOptions): Promise<{
+  server: SdkMcpServer;
+  toolRegistry: ToolRegistry;
+  bannerInfo: BannerInfo;
+  runtimeModuleState: RuntimeModuleState;
+  cleanupEventListeners: () => void;
+  /** Present only when this server owns a semantic index build. HTTP uses the
+   * promise to monitor and retry warmup without starting a second batch. */
+  semanticIndexBuild?: Promise<number>;
+}> {
+  const { config, hitlClient, osVersion, pkg } = options;
+  const harness = resolveHarnessAdapter(config);
+
+  const server = new SdkMcpServer(
+    {
+      name: IDENTITY.MCP_SERVER_NAME,
+      version: pkg.version,
+      description: pkg.description,
+      websiteUrl: WEBSITE_URL,
+      icons: [SERVER_ICON],
+    },
+    // instructions land in InitializeResult.instructions — the only channel that
+    // states Taxi's governed execution boundaries in client context.
+    { instructions: SERVER_INSTRUCTIONS },
+  );
+  // Re-serialize tools/list schemas as JSON Schema 2020-12 — the SDK's
+  // hardcoded draft-7 target makes strict clients reject every tool that has
+  // an outputSchema. Must install before the first registerTool() call (the
+  // SDK lazily registers its tools/list handler there).
+  installToolListSchemaDialectFix(server);
+
+  // Cast to lightweight McpServer for module registration (avoids heavy generic inference)
+  const lServer = server as unknown as LightMcpServer;
+  const toolRegistry = createToolRegistry();
+
+  // Install tool/prompt registry FIRST so its interception runs as the
+  // innermost wrapper. The HITL guard then re-patches registerTool, becoming
+  // the outermost wrapper. Order matters: when a module calls registerTool,
+  // HITL wraps the callback first, then the registry wraps that HITL-wrapped
+  // handler with audit/usage tracking and stores it in its map. This makes
+  // the stored handler `audit(HITL(callback))` so that skill execution via
+  // toolRegistry.callTool() also goes through HITL approval.
+  toolRegistry.configureExposure({
+    mode: config.toolExposure,
+    exposedToolNames: config.toolExposure === "progressive" ? config.progressiveTools : undefined,
+  });
+  toolRegistry.installOn(lServer);
+
+  if (hitlClient && config.hitl.level !== "off") {
+    installHitlGuard(lServer, hitlClient, config);
+  }
+
+  // Dynamic module loading — disabled modules are filtered before import so
+  // opt-in surfaces stay zero-cost at startup.
+  const MODULE_REGISTRY = await loadModuleRegistry(config);
+  setModuleRegistry(MODULE_REGISTRY);
+  const modulePackPlan = getModulePackPlan(config);
+  const modulePacksAvailable = modulePackPlan.packs.filter((pack) => pack.available).map((pack) => pack.name);
+  const modulesMissingPacks = modulePackPlan.modulesMissingPacks;
+  const missingPackActivationHints = buildMissingPackActivationHints(modulesMissingPacks);
+
+  // RFC 0004: route every module through the compatibility resolver. The
+  // resolver folds in minMacosVersion (legacy gate), maxMacosVersion, brokenOn,
+  // requiresHardware, status:"broken", and deprecation schedules into a single
+  // typed decision. We keep the legacy minMacosVersion field as a fallback for
+  // modules that haven't been annotated yet.
+  const compatEnv = getCompatibilityEnv();
+  const enabled: string[] = [];
+  // loadModuleRegistry() filters config-disabled modules before import, so the
+  // registration loop below never sees them — seed the disabled list from the
+  // config directly or profile_status reports modulesDisabled: [] forever.
+  const disabled: string[] = MODULE_NAMES.filter((name) => !isModuleEnabled(config, name));
+  const osBlocked: string[] = [];
+  const deprecated: string[] = [];
+  const broken: string[] = [];
+  const unavailableModules = new Map<string, RuntimeModuleUnavailable>();
+  for (const module of modulesMissingPacks) {
+    unavailableModules.set(module, { module, reason: "module_pack" });
+  }
+  let shortcutsEnabled = false;
+  for (const mod of MODULE_REGISTRY) {
+    // Synthesise a manifest when the module only has the legacy field set.
+    const compatManifest =
+      mod.compatibility ?? (mod.minMacosVersion ? { minMacosVersion: mod.minMacosVersion } : undefined);
+    const decision = resolveModuleCompatibility(mod.name, compatManifest, compatEnv);
+
+    if (decision.decision === "skip-unsupported") {
+      osBlocked.push(`${mod.name} (${decision.reason})`);
+      unavailableModules.set(mod.name, {
+        module: mod.name,
+        reason: "host_unavailable",
+        detail: decision.reason,
+      });
+      continue;
+    }
+    if (decision.decision === "skip-broken") {
+      broken.push(`${mod.name} (${decision.reason})`);
+      unavailableModules.set(mod.name, {
+        module: mod.name,
+        reason: "known_broken",
+        detail: decision.reason,
+      });
+      continue;
+    }
+
+    if (!isModuleEnabled(config, mod.name)) {
+      if (!disabled.includes(mod.name)) disabled.push(mod.name);
+      continue;
+    }
+
+    try {
+      mod.tools(lServer, config);
+      mod.prompts?.(lServer);
+    } catch (e) {
+      log.error("failed to register module", { module: mod.name, err: errToCtx(e) });
+      disabled.push(mod.name);
+      unavailableModules.set(mod.name, {
+        module: mod.name,
+        reason: "registration_failed",
+      });
+      continue;
+    }
+    enabled.push(mod.name);
+    if (mod.name === "shortcuts") shortcutsEnabled = true;
+
+    if (decision.decision === "register-with-deprecation") {
+      deprecated.push(mod.name);
+      log.warn("module registered with deprecation notice", { module: mod.name, reason: decision.reason });
+    }
+  }
+
+  let dynamicShortcutCount = 0;
+  if (shortcutsEnabled) {
+    dynamicShortcutCount = await registerDynamicShortcutTools(lServer);
+  }
+
+  registerCrossPrompts(lServer);
+  registerCrossTools(lServer, config);
+  registerSemanticTools(lServer, config);
+  registerResources(lServer, config);
+  registerSetupTools(lServer, config);
+
+  const skillCounts = await registerSkillEngine(lServer, toolRegistry, options.skillLifecycle ?? "process-owner");
+
+  registerApps(lServer, {
+    calendar: enabled.includes("calendar"),
+    music: enabled.includes("music"),
+    // Timeline fuses calendar + reminders into a single day-axis view, so
+    // we only register it when both modules are enabled.
+    timeline: enabled.includes("calendar") && enabled.includes("reminders"),
+  });
+
+  const buildWorkflowReadiness = () =>
+    assessWorkflowsReadiness({
+      enabledModules: enabled,
+      modulesMissingPacks,
+      registeredTools: toolRegistry.getToolNames(),
+      allowSendMail: config.allowSendMail,
+      allowSendMessages: config.allowSendMessages,
+    });
+
+  registerFrontDoorTools(lServer, {
+    toolRegistry,
+    config,
+    harness,
+    enabledModules: enabled,
+    disabledModules: disabled,
+    modulePacksAvailable,
+    modulesMissingPacks,
+    missingPackActivationHints,
+    buildWorkflowReadiness,
+  });
+  registerTaskDashboardTool(lServer);
+  registerToolSessionTools(lServer, { config, harness, toolRegistry });
+  const cleanupMcpEventListeners = registerEventTools(lServer, {
+    toolRegistry,
+    notifyResourceListChanged: () => server.sendResourceListChanged(),
+  });
+  let listenersCleaned = false;
+  const cleanupEventListeners = () => {
+    if (listenersCleaned) return;
+    listenersCleaned = true;
+    cleanupMcpEventListeners();
+    skillCounts.releaseProcessOwnership();
+  };
+
+  toolRegistry.pruneStaleRegistrations();
+
+  let semanticIndexBuild: Promise<number> | undefined;
+  if (config.features.semanticToolSearch) {
+    const semanticIndex = options.semanticIndex ?? { mode: "build" as const };
+    if (semanticIndex.mode === "build") {
+      semanticIndexBuild = indexToolDescriptions(toolRegistry);
+      semanticIndexBuild.catch((e) => {
+        log.error("semantic tool index failed", { err: errToCtx(e) });
+      });
+    } else if (semanticIndex.mode === "reuse" && !reuseToolDescriptionIndex(semanticIndex.source, toolRegistry)) {
+      log.warn("semantic tool index was not reusable for the session catalog", {
+        note: "substring discovery remains available; restart Taxi to rebuild the changed catalog",
+      });
+    }
+  }
+
+  const toolCount = toolRegistry.getExposedToolCount();
+  const promptCount = toolRegistry.getPromptCount();
+
+  const bannerInfo: BannerInfo = {
+    version: pkg.version,
+    transport: "stdio",
+    modulesEnabled: enabled,
+    modulesDisabled: disabled,
+    modulesOsBlocked: osBlocked,
+    modulesDeprecated: deprecated,
+    modulesBroken: broken,
+    toolCount,
+    promptCount,
+    dynamicShortcuts: dynamicShortcutCount,
+    skillsBuiltin: skillCounts.builtinCount,
+    skillsUser: skillCounts.userCount,
+    hitlLevel: config.hitl.level,
+    macosVersion: osVersion,
+    nodeVersion: process.version.slice(1),
+    sendMessages: config.allowSendMessages,
+    sendMail: config.allowSendMail,
+    compactTools: isCompactMode(),
+  };
+
+  return {
+    server,
+    toolRegistry,
+    bannerInfo,
+    runtimeModuleState: {
+      enabledModules: [...enabled].sort(),
+      unavailableModules: [...unavailableModules.values()].sort((a, b) => a.module.localeCompare(b.module)),
+    },
+    cleanupEventListeners,
+    ...(semanticIndexBuild ? { semanticIndexBuild } : {}),
+  };
+}
