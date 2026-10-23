@@ -168,11 +168,11 @@
   "dependencies": {
     "@heznpc/quota-core": "file:vendor/heznpc-quota-core-0.2.0.tgz",
     "@modelcontextprotocol/ext-apps": "1.7.5",
-    "@modelcontextprotocol/sdk": "1.30.0",
-    "express": "5.2.1",
-    "jose": "6.2.5",
-    "yaml": "2.9.0",
-    "zod": "~4.4.3"
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "express": "5.3.0",
+    "jose": "6.2.13",
+    "yaml": "2.9.1",
+    "zod": "~4.6.7"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.0.0",
