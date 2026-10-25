@@ -113,7 +113,7 @@ describe("tools/list schema dialect", () => {
     // a 2020-12 validator rejects — merely stripping $schema would not do).
     const tuple = windowItem.properties.position.anyOf.find((s) => s.type === "array");
     expect(tuple.prefixItems).toHaveLength(2);
-    expect(tuple.items).toBeUndefined();
+    expect(tuple.items).toBe(false); // A fixed-length tuple rejects additional items.
 
     // No draft-07 marker survives anywhere in the emitted schemas.
     expect(JSON.stringify(tool)).not.toContain("draft-07");

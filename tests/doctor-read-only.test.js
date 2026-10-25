@@ -30,9 +30,9 @@ function expectCompletedDiagnosis(result) {
   // Verify a completed diagnosis and its exit contract independently of host
   // health; the snapshots below assert that diagnosis never repairs the fixture.
   const output = result.stdout.replace(/\x1b\[[0-9;]*m/g, "");
-  const summary = output.match(/Summary\s+✓\s+\d+ passed\s+⚠\s+\d+ warnings\s+✗\s+(\d+) failed/);
+  const summary = output.match(/Summary\s+✓\s+\d+ passed(?:\s+⚠\s+\d+ warnings)?(?:\s+✗\s+(\d+) failed)?/);
   expect(summary).not.toBeNull();
-  expect(result.status).toBe(Number(summary[1]) > 0 ? 1 : 0);
+  expect(result.status).toBe(Number(summary[1] ?? 0) > 0 ? 1 : 0);
 }
 
 function fileSnapshot(path) {

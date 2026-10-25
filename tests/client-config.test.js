@@ -1,7 +1,21 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from "@jest/globals";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
+// Keep fallback tests independent of apps installed on the developer's Mac.
+const installedAppFiles = [
+  "/Applications/Taxi.app/Contents/Resources/taxi/runtime/bin/node",
+  "/Applications/Taxi.app/Contents/Resources/taxi/server/dist/index.js",
+];
+let installedAppAvailable = false;
+jest.unstable_mockModule("node:fs", () => ({
+  ...realFs,
+  existsSync: (path) => installedAppFiles.includes(String(path))
+    ? installedAppAvailable
+    : realFs.existsSync(path),
+}));
 
 const originalHome = process.env.HOME;
 const tempHomes = [];
@@ -20,6 +34,7 @@ function readJson(path) {
 }
 
 beforeEach(() => {
+  installedAppAvailable = false;
   jest.resetModules();
 });
 

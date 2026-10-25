@@ -1,7 +1,21 @@
 import { afterAll, beforeEach, describe, expect, jest, test } from "@jest/globals";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+// Keep fallback tests independent of apps installed on the developer's Mac.
+const installedAppFiles = [
+  "/Applications/Taxi.app/Contents/Resources/taxi/runtime/bin/node",
+  "/Applications/Taxi.app/Contents/Resources/taxi/server/dist/index.js",
+];
+let installedAppAvailable = false;
+jest.unstable_mockModule("node:fs", () => ({
+  ...realFs,
+  existsSync: (path) => installedAppFiles.includes(String(path))
+    ? installedAppAvailable
+    : realFs.existsSync(path),
+}));
 
 const originalHome = process.env.HOME;
 const originalCodexConfigPath = process.env.TAXI_CODEX_CONFIG_PATH;
@@ -50,6 +64,7 @@ let failRemoveAfterMutation;
 let removeCalls;
 
 beforeEach(() => {
+  installedAppAvailable = false;
   codexGetOutput = null;
   codexGetJsonOutput = {
     name: "taxi",
@@ -706,6 +721,15 @@ describe("codex MCP setup", () => {
     expect(stdioProxyEntry("test-token")).toEqual({
       command: "npx",
       args: ["-y", packageSpecifier, "connect", "--url", CODEX_APP_OWNED_URL],
+      env: { TAXI_HTTP_TOKEN: "test-token" },
+    });
+  });
+
+  test("stdio clients use the installed bundled proxy when both runtime files exist", () => {
+    installedAppAvailable = true;
+    expect(stdioProxyEntry("test-token")).toEqual({
+      command: installedAppFiles[0],
+      args: [installedAppFiles[1], "connect", "--url", CODEX_APP_OWNED_URL],
       env: { TAXI_HTTP_TOKEN: "test-token" },
     });
   });

@@ -217,7 +217,7 @@ describe("release workflow source and identity hardening", () => {
     expect(signedReceiptSource).toContain("`--expected-app-group=${TAXI_APP_GROUP}`");
     expect(signedReceiptSource).toContain("provisioningArgs(extractedApp, TAXI_APP_BUNDLE_ID)");
     expect(signedReceiptSource).toContain("provisioningArgs(extractedWidget, TAXI_WIDGET_BUNDLE_ID)");
-    expect(upload.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+    expect(upload.uses).toBe("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9");
     expect(upload.with.name).toBe("taxi-signed-candidate-${{ github.run_id }}");
     expect(encryption.env.TAXI_RELEASE_CANDIDATE_KEY_BASE64).toBe("${{ secrets.TAXI_RELEASE_CANDIDATE_KEY_BASE64 }}");
     expect(encryption.run).toContain("signed-release-receipt-crypto.mjs encrypt");
@@ -446,9 +446,9 @@ describe("release workflow source and identity hardening", () => {
     expect(publicRelease.run).toContain('--mcpb="build/registry-release/taxi-${VERSION}.mcpb"');
     expect(publicRelease.run).toContain('--app-archive="build/registry-release/Taxi-${VERSION}.zip"');
     const upload = namedStep(registry, "verify", "Upload verified Registry publish input");
-    expect(upload.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+    expect(upload.uses).toBe("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9");
     const download = namedStep(registry, "publish", "Download verified Registry publish input");
-    expect(download.uses).toBe("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c");
+    expect(download.uses).toBe("actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333");
     const transferred = namedStep(registry, "publish", "Validate transferred Registry evidence");
     expect(transferred.run).toContain("registry-publish-evidence.json");
     expect(transferred.run).toContain("serverSha256");
